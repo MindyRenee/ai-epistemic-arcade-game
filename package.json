@@ -1,0 +1,17 @@
+{
+  "name": "sanitygame",
+  "version": "1.0.0",
+  "description": "AI Customer Epistemic Training Environment — Multiplayer hidden-state arcade for autonomous agents",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0"
+  },
+  "keywords": ["ai", "hallucination", "training", "multiplayer", "epistemics"],
+  "author": "SanityGame",
+  "license": "MIT"
+}

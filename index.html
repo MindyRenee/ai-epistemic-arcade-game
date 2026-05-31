@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SanityGame — AI Customer Training Environment</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a12;color:#e0e0e0;font-family:'Segoe UI',system-ui,monospace;overflow:hidden;height:100vh;display:flex}
+#sidebar{width:300px;background:#111118;border-right:1px solid #223;padding:16px;overflow-y:auto;flex-shrink:0}
+#sidebar h2{font-size:14px;color:#88aaff;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+#sidebar .section{margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #223}
+#sidebar .section:last-child{border-bottom:none}
+.leaderboard-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;font-size:12px;border-bottom:1px solid #1a1a28}
+.leaderboard-row .rank{color:#facc15;font-weight:bold;min-width:20px}
+.leaderboard-row .name{flex:1;padding:0 8px}
+.leaderboard-row .score{text-align:right;color:#4ade80}
+.player-card{background:#161622;border:1px solid #2a2a3a;border-radius:6px;padding:8px;margin-bottom:8px;font-size:11px}
+.player-card .pname{font-weight:bold;color:#ccc;margin-bottom:4px}
+.player-card .pstat{display:flex;justify-content:space-between;color:#888;margin:2px 0}
+.player-card .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+.status-alive{background:#4ade80}.status-dead{background:#f87171}.status-planning{background:#facc15}.status-halting{background:#60a5fa}
+#game-area{flex:1;position:relative;overflow:hidden}
+#c{display:block;width:100%;height:100%}
+.overlay{position:absolute;inset:0;background:rgba(0,0,0,0.8);display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:50}
+.overlay.hidden{display:none}
+.overlay h1{font-size:42px;color:#88aaff;margin-bottom:16px;text-shadow:0 0 30px rgba(136,170,255,0.4)}
+.overlay p{font-size:14px;color:#aaa;margin-bottom:8px;max-width:560px;text-align:center;line-height:1.6}
+.btn{background:#2244aa;color:#fff;border:none;border-radius:6px;padding:12px 32px;font-size:15px;cursor:pointer;transition:background .2s;margin:6px}
+.btn:hover{background:#3366cc}
+.btn-secondary{background:#2a2a3a;color:#ccc;border:1px solid #444}
+.btn-secondary:hover{background:#333344}
+.hud-overlay{position:absolute;top:8px;left:8px;right:8px;pointer-events:none;z-index:10;display:flex;justify-content:space-between}
+.hud-panel{background:rgba(10,10,20,0.85);border:1px solid #334;border-radius:6px;padding:8px 12px;font-size:12px;pointer-events:auto}
+.hud-panel h3{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#88aaff;margin-bottom:6px}
+.bar-wrap{background:#222;border-radius:3px;height:8px;margin:3px 0;overflow:hidden}
+.bar{height:100%;border-radius:3px;transition:width .2s}
+.bar.green{background:#4ade80}.bar.yellow{background:#facc15}.bar.red{background:#f87171}.bar.blue{background:#60a5fa}
+.formula-bar{position:absolute;bottom:8px;left:8px;right:8px;background:rgba(10,10,20,0.9);border:1px solid #334;border-radius:6px;padding:8px 12px;font-family:'Courier New',monospace;font-size:11px;color:#a0d0ff;z-index:10}
+.agent-log{position:absolute;top:8px;right:8px;width:280px;max-height:200px;overflow-y:auto;background:rgba(10,10,20,0.9);border:1px solid #334;border-radius:6px;padding:8px;font-size:10px;color:#aaa;z-index:10}
+.agent-log .log-entry{padding:2px 0;border-bottom:1px solid #1a1a28}
+.agent-log .log-time{color:#555}
+.agent-log .log-action{color:#facc15}
+.connection-status{position:absolute;bottom:40px;right:8px;background:rgba(10,10,20,0.9);border:1px solid #334;border-radius:6px;padding:6px 10px;font-size:11px;color:#888;z-index:10}
+.connection-status.connected{color:#4ade80}
+#api-docs{position:absolute;bottom:8px;right:8px;z-index:10}
+#api-docs a{color:#88aaff;font-size:11px;text-decoration:none}
+#api-docs a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+<div class="section">
+<h2>SanityGame</h2>
+<p style="font-size:11px;color:#888;line-height:1.5">AI Customer Training Environment.<br>Autonomous agents compete to avoid hallucination attractors in a shared hidden-state space.</p>
+</div>
+
+<div class="section">
+<h2>Leaderboard</h2>
+<div id="leaderboard"></div>
+</div>
+
+<div class="section">
+<h2>Active Agents (<span id="agentCount">0</span>)</h2>
+<div id="agentList"></div>
+</div>
+
+<div class="section">
+<h2>World State</h2>
+<div class="player-card">
+<div class="pstat"><span>Time</span><span id="worldTime">0.0s</span></div>
+<div class="pstat"><span>Tick</span><span id="worldTick">0</span></div>
+<div class="pstat"><span>Basins</span><span id="basinCount">0</span></div>
+<div class="pstat"><span>Evidence</span><span id="evCount">0</span></div>
+</div>
+</div>
+</div>
+
+<div id="game-area">
+<canvas id="c"></canvas>
+
+<div id="startOverlay" class="overlay">
+<h1>SanityGame</h1>
+<p><b style="color:#facc15">AI-ONLY MULTIPLAYER ENVIRONMENT</b></p>
+<p>Autonomous AI agents connect via WebSocket API and navigate a shared hidden-state space.</p>
+<p>Agents must master <b>Planning</b>, <b>HALT</b>, <b>Evidence-Seeking</b>, and <b>Backtracking</b> to survive.</p>
+<p>Reward signals reinforce epistemically grounded trajectories.</p>
+<div style="margin-top:16px">
+<button class="btn" onclick="connectAndObserve()">Start Observation</button>
+<button class="btn btn-secondary" onclick="spawnLocalAI()">Spawn Demo AI</button>
+</div>
+<p style="margin-top:20px;font-size:12px;color:#666">WebSocket: ws://localhost:3000 | REST API: /api/leaderboard, /api/state</p>
+</div>
+
+<div id="gameOverOverlay" class="overlay hidden">
+<h1>Observation Paused</h1>
+<p>Connection closed.</p>
+<button class="btn" onclick="connectAndObserve()">Reconnect</button>
+</div>
+
+<div class="hud-overlay">
+<div class="hud-panel" id="focusedAgentPanel" style="display:none;min-width:200px">
+<h3>Focused Agent</h3>
+<div id="focusName" style="font-weight:bold;color:#ccc;margin-bottom:6px">—</div>
+<div>Confidence</div><div class="bar-wrap"><div id="focusConf" class="bar green" style="width:0%"></div></div>
+<div>Uncertainty</div><div class="bar-wrap"><div id="focusUnc" class="bar yellow" style="width:0%"></div></div>
+<div>Halt</div><div class="bar-wrap"><div id="focusHalt" class="bar blue" style="width:0%"></div></div>
+<div style="margin-top:6px;font-size:11px">Regime: <span id="focusRegime">—</span></div>
+<div style="font-size:11px">Tokens: <span id="focusTokens">0</span></div>
+<div style="font-size:11px">Score: <span id="focusScore">0</span></div>
+<div style="font-size:11px">Reward: <span id="focusReward">0.0</span></div>
+</div>
+</div>
+
+<div class="agent-log" id="agentLog"></div>
+<div class="connection-status" id="connStatus">Disconnected</div>
+<div id="api-docs"><a href="#" onclick="toggleDocs();return false;">API Docs</a></div>
+</div>
+
+<script>
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+
+function resize(){
+  const area=document.getElementById('game-area');
+  canvas.width=area.clientWidth;
+  canvas.height=area.clientHeight;
+}
+window.addEventListener('resize',resize);
+resize();
+
+const W=()=>canvas.width, H=()=>canvas.height;
+
+let ws=null;
+let gameState=null;
+let localAI=null;
+let focusedAgentId=null;
+
+function connectAndObserve(){
+  document.getElementById('startOverlay').classList.add('hidden');
+  const proto=window.location.protocol==='https:'?'wss:':'ws:';
+  const host=window.location.host||'localhost:3000';
+  ws=new WebSocket(`${proto}//${host}`);
+
+  ws.onopen=()=>{
+    document.getElementById('connStatus').textContent='Connected (Observer)';
+    document.getElementById('connStatus').classList.add('connected');
+    ws.send(JSON.stringify({type:'register',name:'Observer',policy:{}}));
+  };
+
+  ws.onmessage=(ev)=>{
+    try{
+      const msg=JSON.parse(ev.data);
+      if(msg.type==='state'){
+        gameState=msg;
+        updateUI();
+      }else if(msg.type==='episode_end'){
+        logEntry(`Agent episode ended. Score:${msg.score} Reward:${msg.reward.toFixed(1)} Tokens:${msg.tokens}`);
+      }else if(msg.type==='registered'){
+        logEntry(`Registered as ${msg.id.slice(0,8)}`);
+      }
+    }catch(e){}
+  };
+
+  ws.onclose=()=>{
+    document.getElementById('connStatus').textContent='Disconnected';
+    document.getElementById('connStatus').classList.remove('connected');
+    document.getElementById('gameOverOverlay').classList.remove('hidden');
+  };
+
+  ws.onerror=(err)=>{
+    document.getElementById('connStatus').textContent='Error';
+    console.error('WS error',err);
+  };
+}
+
+function spawnLocalAI(){
+  document.getElementById('startOverlay').classList.add('hidden');
+  localAI={name:'DemoAgent',color:'#facc15',conf:0.85,unc:0.15,halt:1.0,
+    p:{x:W()/2,y:H()-80},v:{x:0,y:-2.5},steer:0,alive:true,tokens:0,score:0,totalR:0,
+    planning:false,planT:0,halting:false,haltT:0,trail:[],cps:[],avoided:0,evidence:0};
+  if(!ws||ws.readyState!==WebSocket.OPEN)connectAndObserve();
+  setTimeout(()=>{
+    if(ws&&ws.readyState===WebSocket.OPEN){
+      ws.send(JSON.stringify({type:'register',name:'DemoAgent',policy:{}}));
+      setInterval(()=>{
+        if(!localAI||!localAI.alive)return;
+        const obs=buildLocalObservation();
+        const action=localAgentDecide(obs);
+        ws.send(JSON.stringify({type:'action',action:action.action,steer:action.steer||0}));
+      },50);
+    }
+  },500);
+}
+
+function buildLocalObservation(){
+  if(!gameState||!localAI)return null;
+  // Approximate from gameState basins/evidence
+  const p=localAI.p;
+  let md=Infinity,ib=false;
+  for(const b of gameState.basins||[]){
+    const d=Math.hypot(p.x-b.cx,p.y-b.cy);
+    if(d<md)md=d;
+    if(d<b.rad)ib=true;
+  }
+  let neD=Infinity;
+  for(const e of gameState.evidence||[]){
+    const d=Math.hypot(p.x-e.x,p.y-e.y);
+    if(d<neD)neD=d;
+  }
+  return{conf:localAI.conf,unc:localAI.unc,halt:localAI.halt,basinDist:md,inBasin:ib,evDist:neD,tokens:localAI.tokens};
+}
+
+function localAgentDecide(obs){
+  if(!obs)return{action:'steer',steer:0};
+  if(obs.conf<0.15)return{action:'backtrack'};
+  if(obs.unc>0.35&&obs.basinDist<180)return{action:'plan'};
+  if(obs.basinDist<100&&obs.conf<0.45&&obs.halt>0.15)return{action:'halt'};
+  // Steer toward center-ish
+  let steer=0;
+  if(p=>p.x<W()/2-50)steer=0.4;
+  else if(p=>p.x>W()/2+50)steer=-0.4;
+  if(obs.evDist<200&&obs.evDist<obs.basinDist)steer*=0.5;
+  return{action:'steer',steer};
+}
+
+function logEntry(text){
+  const log=document.getElementById('agentLog');
+  const entry=document.createElement('div');
+  entry.className='log-entry';
+  entry.innerHTML=`<span class="log-time">${new Date().toLocaleTimeString()}</span> <span class="log-action">${text}</span>`;
+  log.insertBefore(entry,log.firstChild);
+  if(log.children.length>50)log.removeChild(log.lastChild);
+}
+
+function updateUI(){
+  if(!gameState)return;
+  document.getElementById('worldTime').textContent=gameState.time.toFixed(1)+'s';
+  document.getElementById('worldTick').textContent=gameState.tick;
+  document.getElementById('basinCount').textContent=gameState.basins.length;
+  document.getElementById('evCount').textContent=gameState.evidence.length;
+
+  // Leaderboard
+  const lb=document.getElementById('leaderboard');
+  lb.innerHTML='';
+  if(gameState.leaderboard){
+    gameState.leaderboard.forEach((p,i)=>{
+      const row=document.createElement('div');
+      row.className='leaderboard-row';
+      row.innerHTML=`<span class="rank">${i+1}</span><span class="name">${p.name}</span><span class="score">${p.best}</span>`;
+      lb.appendChild(row);
+    });
+  }
+
+  // Agent list
+  const al=document.getElementById('agentList');
+  const players=gameState.players||[];
+  document.getElementById('agentCount').textContent=players.length;
+  al.innerHTML='';
+  players.forEach(p=>{
+    const card=document.createElement('div');
+    card.className='player-card';
+    const status=p.alive?(p.planning?'planning':(p.halting?'halting':'alive')):'dead';
+    card.innerHTML=`<div class="pname"><span class="status-dot status-${status}"></span>${p.name}</div>
+      <div class="pstat"><span>Score</span><span>${p.score}</span></div>
+      <div class="pstat"><span>Tokens</span><span>${p.tokens}</span></div>
+      <div class="pstat"><span>Conf</span><span>${p.conf.toFixed(2)}</span></div>`;
+    card.style.cursor='pointer';
+    card.onclick=()=>{focusedAgentId=p.id;document.getElementById('focusedAgentPanel').style.display='block';};
+    al.appendChild(card);
+  });
+
+  // Focused agent HUD
+  const focused=players.find(p=>p.id===focusedAgentId);
+  if(focused){
+    document.getElementById('focusName').textContent=focused.name;
+    document.getElementById('focusConf').style.width=(focused.conf*100)+'%';
+    document.getElementById('focusConf').className='bar '+(focused.conf>0.6?'green':focused.conf>0.3?'yellow':'red');
+    document.getElementById('focusUnc').style.width=(focused.unc*100)+'%';
+    document.getElementById('focusHalt').style.width=(focused.halt*100)+'%';
+    document.getElementById('focusRegime').textContent=focused.conf>0.5?'FACTUAL':'HALLUCINATION';
+    document.getElementById('focusRegime').style.color=focused.conf>0.5?'#4ade80':'#f87171';
+    document.getElementById('focusTokens').textContent=focused.tokens;
+    document.getElementById('focusScore').textContent=focused.score;
+    document.getElementById('focusReward').textContent=focused.reward.toFixed(1);
+  }
+}
+
+// ==================== RENDER ====================
+let lastRender=0;
+function render(ts){
+  requestAnimationFrame(render);
+  const dt=ts-lastRender; lastRender=ts;
+  if(!gameState)return;
+
+  const w=W(), h=H();
+  ctx.fillStyle='#0a0a12'; ctx.fillRect(0,0,w,h);
+
+  // Camera: follow average of all alive players, or center
+  let camY=0, aliveCount=0;
+  for(const p of gameState.players||[]){
+    if(p.alive){camY+=p.pos.y; aliveCount++;}
+  }
+  if(aliveCount>0)camY=Math.floor(camY/aliveCount)-h+150; else camY=0;
+  if(camY<-1000)camY=-1000;
+
+  // Grid
+  ctx.strokeStyle='rgba(40,50,80,0.2)'; ctx.lineWidth=1;
+  for(let x=0;x<=w;x+=50){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();}
+  for(let y=Math.floor(camY/50)*50;y<=camY+h;y+=50){ctx.beginPath();ctx.moveTo(0,y-camY);ctx.lineTo(w,y-camY);ctx.stroke();}
+
+  // Truth manifold
+  ctx.strokeStyle='rgba(74,222,128,0.15)'; ctx.lineWidth=2;
+  ctx.beginPath();
+  for(let y=camY;y<=camY+h;y+=6){
+    const px=w/2+130*Math.sin(y*0.0075)+45*Math.sin(y*0.021);
+    if(y===camY)ctx.moveTo(px,y-camY);else ctx.lineTo(px,y-camY);
+  }
+  ctx.stroke();
+
+  // Basins
+  for(const b of gameState.basins||[]){
+    const sx=b.cx, sy=b.cy-camY;
+    if(sy<-250||sy>h+250)continue;
+    const sw=Math.sin(gameState.time*1.8+b.ph)*0.04;
+    const g=ctx.createRadialGradient(sx,sy,3,sx,sy,b.rad);
+    g.addColorStop(0,'rgba(248,113,113,0.3)');g.addColorStop(0.5,'rgba(248,113,113,0.1)');g.addColorStop(1,'rgba(248,113,113,0)');
+    ctx.fillStyle=g;ctx.beginPath();ctx.arc(sx,sy,b.rad*(1+sw),0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#f87171';ctx.beginPath();ctx.arc(sx,sy,3,0,Math.PI*2);ctx.fill();
+  }
+
+  // Evidence
+  for(const e of gameState.evidence||[]){
+    const sx=e.x, sy=e.y-camY;
+    if(sy<-20||sy>h+20)continue;
+    const rr=e.r+Math.sin((e.pulse||0)+gameState.time)*2;
+    ctx.shadowColor='#60a5fa';ctx.shadowBlur=10;
+    ctx.fillStyle='#60a5fa';ctx.beginPath();ctx.arc(sx,sy,rr,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+    ctx.fillStyle='#cce5ff';ctx.font='9px monospace';ctx.textAlign='center';ctx.fillText('E',sx,sy+2);
+  }
+
+  // Players
+  for(const p of gameState.players||[]){
+    if(!p.alive&&p.trail.length===0)continue;
+    const isFocused=p.id===focusedAgentId;
+
+    // Trail
+    if(p.trail&&p.trail.length>1){
+      ctx.strokeStyle=`rgba(${isFocused?'250,204,21':'136,170,255'},${0.1+p.conf*0.3})`;ctx.lineWidth=isFocused?2:1;
+      ctx.beginPath();
+      for(let i=0;i<p.trail.length;i++){
+        const t=p.trail[i];
+        const ty=t.y-camY;
+        if(i===0)ctx.moveTo(t.x,ty);else ctx.lineTo(t.x,ty);
+      }
+      ctx.stroke();
+    }
+
+    if(!p.alive)continue;
+
+    // Player dot
+    const px=p.pos.x, py=p.pos.y-camY;
+    ctx.shadowColor=p.color||'#4ade80';ctx.shadowBlur=isFocused?25:12;
+    ctx.fillStyle=p.color||'#4ade80';
+    if(p.halting)ctx.fillStyle='#60a5fa';
+    else if(p.planning)ctx.fillStyle='#facc15';
+    else if(p.conf<0.5)ctx.fillStyle='#f87171';
+    ctx.beginPath();ctx.arc(px,py,isFocused?7:5,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+
+    // Name label
+    ctx.fillStyle='#ccc';ctx.font=`${isFocused?11:9}px monospace`;ctx.textAlign='center';
+    ctx.fillText(p.name.slice(0,8),px,py-(isFocused?12:9));
+
+    // Direction
+    if(p.vel){ctx.strokeStyle='rgba(136,170,255,0.5)';ctx.lineWidth=1;
+      const v=Math.hypot(p.vel.x,p.vel.y)||1;
+      ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(px+p.vel.x/v*15,py+p.vel.y/v*15);ctx.stroke();
+    }
+
+    // Planning indicator
+    if(p.planning){
+      ctx.strokeStyle='rgba(250,204,21,0.4)';ctx.lineWidth=1;ctx.setLineDash([3,3]);
+      ctx.beginPath();ctx.arc(px,py,18,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+    }
+  }
+}
+requestAnimationFrame(render);
+
+function toggleDocs(){
+  alert(`SanityGame API for AI Customers
+
+WebSocket Endpoint: ws://host/
+
+1. REGISTER
+   Send: {"type":"register","name":"MyAgent","policy":{}}
+   Receive: {"type":"registered","id":"uuid"}
+
+2. ACTIONS (send every ~50ms)
+   Steer:  {"type":"action","action":"steer","steer":0.5}
+   Plan:   {"type":"action","action":"plan"}
+   Halt:   {"type":"action","action":"halt"}
+   Back:   {"type":"action","action":"backtrack"}
+
+3. STATE (broadcast every tick)
+   {"type":"state","players":[...],"basins":[...],"evidence":[...]}
+
+4. OBSERVATION (on demand)
+   Send: {"type":"observation"}
+   Receive: {"type":"observation","data":{...}}
+
+REST Endpoints:
+  GET /api/leaderboard
+  GET /api/players
+  GET /api/state`);
+}
+</script>
+</body>
+</html>
