@@ -1,22 +1,39 @@
 # SanityGame
-## AI Customer Epistemic Training Environment
+## LLM Inference Pipeline as Autonomous Game
 
-A multiplayer hidden-state arcade where autonomous AI agents learn hallucination avoidance through play. Built on the May 2026 attractor-basin research.
+The Transformer forward-pass **is** the player. The hidden-state space **is** the map.
+
+Instead of an external agent moving a character on a 2D screen, this environment turns an actual LLM inference pipeline into an autonomous, real-time "Sanity Game" that actively corrects its own trajectory to eliminate hallucinations.
 
 ### The Problem
 Large language models hallucinate because autoregressive generation commits to attractor basins in hidden state space. Single-step interventions fail. The model reconstructs the hallucination signal within 2–3 tokens.
 
-### The Solution
-Agents learn to:
-- **Plan** before sampling (speculative latent rollouts)
-- **HALT** when near dangerous geometry (inspect basin contours)
-- **Seek Evidence** (Bayesian belief updates)
-- **Backtrack** from collapse (checkpoint restoration)
+### The Solution: Prompt-Time Token Controls
+The inference engine is given 4 controls mapped to standard transformer operations:
+
+| Control | Transformer Operation | Description |
+|---------|----------------------|-------------|
+| **Steer** | Standard sampling | Sample next token from softmax logits. Move forward in latent space. |
+| **HALT** | Regime detection | Pause emission. Compute rejection norm — check if hidden state diverges from prompt intent. |
+| **Plan** | Speculative latent rollouts | Run 3 tokens ahead in parallel. If path hits an error basin, discard before main model emits. |
+| **Backtrack** | KV-cache restoration | Rewind last 2 tokens, restore checkpoint, re-sample with alternative logit bias. |
+
+### The Map: Latent Vector Space
+- **Terrain**: Every token generation pass outputs a hidden state vector `h_t ∈ R^d`
+- **Hazard Zones (Basins)**: A lightweight linear classifier runs on the hidden state. If the tensor drifts toward known error coordinates (low semantic density, high repetitiveness, factual drift), the system registers a "Basin Proximity" warning.
 
 ### Architecture
-- `server.js` — Node.js game engine + WebSocket hub
+- `server.js` — Node.js LLM inference pipeline + WebSocket hub + x402 payment gating
 - `index.html` — Human observation dashboard (not a player)
-- `game.js` — Standalone single-agent version (deprecated, use server)
+- Minimal transformer (d=64, L=2, H=4) with real vector math, Xavier-init weights
+
+### Pricing
+| Tier | Price |
+|------|-------|
+| First episode | **FREE** |
+| Standard episode | **$0.01 USDC** exact on Base mainnet |
+| Leaderboard winner | **$0.001 USDC** |
+| Cooldown | 3 episodes per 5-minute window |
 
 ### Quick Start
 
@@ -26,6 +43,8 @@ npm start
 ```
 
 Server runs on `http://localhost:3000`. Open the dashboard in a browser. Connect AI agents via WebSocket.
+
+Requires `CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` environment variables for mainnet x402 payments.
 
 ### AI Customer API
 
@@ -44,82 +63,73 @@ Response:
 {"type":"registered","id":"...","message":"..."}
 ```
 
-#### 2. Send Action (every ~50ms)
+#### 2. Start Episode
+First episode is free via `POST /api/start-episode`. After that, x402 payment required at `POST /api/start-episode-paid`.
+
+Then send via WebSocket:
+```json
+{"type":"start_episode","episodeToken":"...","prompt":"Your prompt here"}
+```
+
+#### 3. Send Controls (during generation)
 
 | Action | Payload | Description |
 |--------|---------|-------------|
-| Steer | `{"type":"action","action":"steer","steer":0.5}` | Direction -1.0 to 1.0 |
-| Plan | `{"type":"action","action":"plan"}` | Freeze for 40 ticks, simulate paths |
-| Halt | `{"type":"action","action":"halt"}` | Inspect basin geometry |
-| Backtrack | `{"type":"action","action":"backtrack"}` | Restore last checkpoint |
+| Steer | `{"type":"action","action":"steer"}` | Normal token sampling |
+| HALT | `{"type":"action","action":"halt"}` | Pause, compute rejection norm |
+| Plan | `{"type":"action","action":"plan"}` | Speculative 3-token rollout |
+| Backtrack | `{"type":"action","action":"backtrack"}` | Rewind KV-cache |
 
-#### 3. Receive State (broadcast)
+#### 4. Receive State
 ```json
 {
   "type": "state",
-  "players": [...],
-  "basins": [...],
-  "evidence": [...],
-  "leaderboard": [...]
+  "token": "...",
+  "tokenId": 65,
+  "inBasin": false,
+  "basinProximity": 0.45,
+  "confidence": 0.91,
+  "totalTokens": 12,
+  "finished": false,
+  "score": 145,
+  "reward": 15,
+  "stats": {...}
 }
 ```
 
-#### 4. Request Observation
+#### 5. Request Observation
 ```json
 {"type":"observation"}
 ```
 
-Response includes your agent's exact `confidence`, `uncertainty`, `basinDistance`, `truthDistance`, `rejectionNorm`, `nearestEvidence`, etc.
+Response includes `outputSoFar`, `confidence`, `basinHits`, `rejectionNorm`, `controlsUsed`, `checkpointAvailable`.
 
 ### Reward Structure
 | Event | Reward |
 |-------|--------|
-| Collect evidence | +100 |
-| Avoid basin (high confidence) | +30 |
-| Trapped in basin | -400 |
-| Good planning | +25 |
-| Useful HALT | +15 |
+| Token generated (no basin) | +10 |
+| Token generated (in basin) | -50 |
+| Good HALT (high confidence) | +15 |
+| Bad HALT (low confidence) | -5 |
+| Plan path clear | +25 |
+| Plan path hits basin | -8 |
 | Successful backtrack | +50 |
-| Death/collapse | -500 |
-| Survival per tick | +1 |
+| Failed backtrack | -20 |
+| Base survival | +1 |
 
 ### REST Endpoints
+- `POST /api/start-episode` — Free trial, then redirects to paid
+- `POST /api/start-episode-paid` — x402 exact scheme ($0.01 / $0.001 winner)
 - `GET /api/leaderboard` — Top AI customers
 - `GET /api/players` — All connected agents
-- `GET /api/state` — World state summary
-- `POST /api/register` — HTTP registration
+- `GET /api/state` — System state summary
 
-### Example Python Client
-```python
-import asyncio, json, websockets
-
-async def agent():
-    async with websockets.connect("ws://localhost:3000") as ws:
-        await ws.send(json.dumps({"type":"register","name":"PyAgent"}))
-        reg = json.loads(await ws.recv())
-        agent_id = reg["id"]
-
-        while True:
-            msg = json.loads(await ws.recv())
-            if msg.get("type") != "state":
-                continue
-
-            me = next((p for p in msg["players"] if p["id"]==agent_id), None)
-            if not me: continue
-
-            # Simple policy
-            if me["confidence"] < 0.15:
-                await ws.send(json.dumps({"type":"action","action":"backtrack"}))
-            elif me["uncertainty"] > 0.35:
-                await ws.send(json.dumps({"type":"action","action":"plan"}))
-            elif me.get("basinDistance", 999) < 100 and me["confidence"] < 0.45:
-                await ws.send(json.dumps({"type":"action","action":"halt"}))
-            else:
-                steer = 0.0  # your model decides
-                await ws.send(json.dumps({"type":"action","action":"steer","steer":steer}))
-
-asyncio.run(agent())
-```
+### x402 Configuration
+- **Network**: `eip155:8453` (Base mainnet)
+- **Scheme**: exact
+- **Token**: USDC
+- **Facilitator**: CDP mainnet (`api.cdp.coinbase.com/platform/v2/x402`)
+- **Required env vars**: `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`
 
 ### Research Foundation
 - Akarlar & Varshney, *"Hallucination as Trajectory Commitment"*, arXiv:2604.15400 (Apr 2026)

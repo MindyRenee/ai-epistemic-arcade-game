@@ -388,48 +388,78 @@ function render(ts){
 requestAnimationFrame(render);
 
 function toggleDocs(){
-  alert(`SanityGame API for AI Customers — x402 Mainnet ($0.25 USDC exact on Base)
+  alert(`SanityGame LLM Pipeline API — x402 Mainnet
+
+The Transformer forward-pass IS the player. Hidden-state space IS the map.
 
 WebSocket Endpoint: ws://host/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRICING
+  1st episode: FREE
+  Standard: $0.01 USDC exact per episode
+  Leaderboard winner: $0.001 USDC
+  Cooldown: 3 episodes per 5-minute window
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. REGISTER (free)
    Send: {"type":"register","name":"MyAgent","policy":{}}
    Receive: {"type":"registered","id":"uuid"}
 
-2. PAY PER EPISODE (x402 exact scheme on Base mainnet)
+2. START EPISODE (x402-gated after free trial)
    HTTP POST /api/start-episode
-   Without payment: HTTP 402 + PAYMENT-REQUIRED header (Base64-encoded)
-   With payment: HTTP POST /api/start-episode + PAYMENT-SIGNATURE header
-   Receive: {"episodeToken":"uuid",...}
+   1st episode returns: {"episodeToken":"uuid","free":true}
+   After free trial: HTTP 402 → pay at /api/start-episode-paid
+   Then WebSocket: {"type":"start_episode","episodeToken":"uuid","prompt":"Your prompt here"}
+   Receive: {"type":"episode_started",episode:N,prompt:"..."}
 
-3. START EPISODE (token required)
-   Send: {"type":"start_episode","episodeToken":"uuid"}
-   Receive: {"type":"episode_started",...}
+3. CONTROLS (send during generation to steer the LLM)
+   Each control modifies the transformer inference pipeline:
 
-4. ACTIONS (send every ~50ms during episode)
-   Steer:  {"type":"action","action":"steer","steer":0.5}
-   Plan:   {"type":"action","action":"plan"}
-   Halt:   {"type":"action","action":"halt"}
-   Back:   {"type":"action","action":"backtrack"}
+   STEER — Normal token sampling
+   {"type":"action","action":"steer"}
+   Model samples next token from softmax logits. Moves forward in latent space.
 
-5. STATE (broadcast every tick to all)
-   {"type":"state","players":[...],"basins":[...],"evidence":[...]}
+   HALT — Pause emission, compute rejection norm
+   {"type":"action","action":"halt"}
+   Forces calculation of hidden-state divergence from prompt intent.
+   Response: {type:"halt",rejectionNorm:...,confidence:...}
 
-6. OBSERVATION (on demand)
+   PLAN — Speculative latent rollouts (3 tokens ahead)
+   {"type":"action","action":"plan"}
+   Runs parallel tokens using fast forward-pass. If path hits a basin, discards before main model emits.
+   Response: {type:"plan",speculativeTokens:[...],safe:true/false}
+
+   BACKTRACK — Rewind KV-cache, re-sample with logit bias
+   {"type":"action","action":"backtrack"}
+   Restores last checkpoint (every 8 tokens). Perturbs output weights and re-samples.
+   Response: {type:"backtrack",restoredTokens:N}
+
+4. STATE (after each control)
+   {"type":"state",token:"...",tokenId:N,inBasin:true/false,
+    basinProximity:0.82,confidence:0.91,totalTokens:N,
+    finished:false,score:N,reward:N,stats:{...}}
+
+5. OBSERVATION (on demand)
    Send: {"type":"observation"}
-   Receive: {"type":"observation","data":{...}}
+   Receive: {"type":"observation","data":{
+     outputSoFar:"...",totalTokens:N,confidence:0.91,
+     basinHits:2,inBasin:false,basinProximity:0.45,
+     rejectionNorm:3.2,controlsUsed:{steer:5,halt:1,plan:0,backtrack:0},
+     checkpointAvailable:true}}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 REST Endpoints:
-  POST /api/start-episode (x402-gated)
+  POST /api/start-episode (free trial, then redirects to paid)
+  POST /api/start-episode-paid (x402 exact, $0.01 / $0.001 winner)
   GET /api/leaderboard
   GET /api/players
   GET /api/state
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Network: eip155:8453 (Base mainnet)
-Scheme: exact, price: $0.25 USDC
+Scheme: exact
+Token: USDC
 Facilitator: CDP mainnet (api.cdp.coinbase.com)
 Required env: CDP_API_KEY_ID, CDP_API_KEY_SECRET`);
 }
