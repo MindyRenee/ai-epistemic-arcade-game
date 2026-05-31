@@ -350,8 +350,12 @@ function getMcpServer(){
     }
     if (player.stats.episodes === 0) {
       const token = crypto.randomUUID();
-      episodeTokens.set(token, { createdAt: Date.now(), used: false, free: true });
-      return { content: [{ type: 'text', text: JSON.stringify({ episodeToken: token, free: true, message: 'Free trial episode! Use this token with send_action.' }) }] };
+      episodeTokens.set(token, { createdAt: Date.now(), used: true, free: true, playerId });
+      recordEpisode(player);
+      const sess = new GenerationSession(playerId, prompt || 'The quick brown fox');
+      activeSessions.set(playerId, sess);
+      player.stats.episodes++;
+      return { content: [{ type: 'text', text: JSON.stringify({ episodeToken: token, free: true, episodeStarted: true, prompt: prompt || 'The quick brown fox', message: 'Free trial episode started. Use send_action with controls: steer, halt, plan, backtrack.' }) }] };
     }
     if (episodeToken) {
       const et = episodeTokens.get(episodeToken);
