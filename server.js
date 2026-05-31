@@ -14,6 +14,45 @@ const wss = new WebSocketServer({ server });
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
+// ==================== x402 PAYMENT GATING ====================
+// AI agents pay $0.25 per episode to train.
+const X402 = {
+  enabled: process.env.X402_ENABLED !== 'false',
+  amount: process.env.X402_AMOUNT || '0.25',
+  currency: process.env.X402_CURRENCY || 'USD',
+  token: process.env.X402_TOKEN || 'USDC',
+  chain: process.env.X402_CHAIN || 'base',
+  decimals: 6,
+  recipient: process.env.X402_WALLET || '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
+  // Convert amount to base units
+  amountBaseUnits() {
+    const val = parseFloat(this.amount);
+    return Math.floor(val * Math.pow(10, this.decimals)).toString();
+  },
+  // Mock verifier — replace with RPC call in production
+  async verify(txHash) {
+    if (!txHash || typeof txHash !== 'string' || !txHash.startsWith('0x')) return false;
+    // Accept any 66-char hex string as valid for demo
+    // In production: call Base RPC to confirm transfer to recipient
+    return txHash.length === 66;
+  }
+};
+
+function sendPaymentRequired(ws) {
+  ws.send(JSON.stringify({
+    type: 'x402_payment_required',
+    version: '0.1.0',
+    amount: X402.amount,
+    amountBaseUnits: X402.amountBaseUnits(),
+    currency: X402.currency,
+    token: X402.token,
+    chain: X402.chain,
+    recipientAddress: X402.recipient,
+    reason: 'One episode of SanityGame epistemic training',
+    message: 'Submit payment proof: {"type":"x402_payment","txHash":"0x..."}'
+  }));
+}
+
 // ==================== GAME ENGINE ====================
 const W = 1200, H = 800;
 
@@ -77,7 +116,7 @@ class AIPlayer {
     this.totalR = 0;
     this.avoided = 0;
     this.evidence = 0;
-    this.alive = true;
+    this.alive = false; // starts dead; must pay then start_episode
     this.color = this.generateColor();
   }
 
@@ -208,12 +247,16 @@ function endEpisode(player,reason){
   s.bestScore=Math.max(s.bestScore,player.score);
   s.avgTokens=Math.round(s.totalTokens/s.episodes);
 
+  player.alive = false;
+
   if(player.ws&&player.ws.readyState===1){
     player.ws.send(JSON.stringify({type:'episode_end',score:player.score,reward:player.totalR,tokens:player.tokens,reason,stats:s}));
+    // Require payment for next episode
+    if(X402.enabled){
+      player.ws.paidForNext = false;
+      sendPaymentRequired(player.ws);
+    }
   }
-
-  // Auto-respawn after delay
-  setTimeout(()=>{player.resetState();},2000);
 }
 
 function getObservation(player) {
@@ -285,27 +328,77 @@ setInterval(gameTick,16);
 // ==================== WEBSOCKET API ====================
 wss.on('connection',(ws,req)=>{
   console.log('AI customer connected');
-  ws.send(JSON.stringify({type:'connected',message:'Welcome to SanityGame. Send {type:"register",name:"YourName",policy:{}} to begin.'}));
+  ws.paidForNext = !X402.enabled; // skip if payments disabled
+
+  if(X402.enabled){
+    sendPaymentRequired(ws);
+  }else{
+    ws.send(JSON.stringify({type:'connected',message:'Welcome to SanityGame. Send {type:"register",name:"YourName",policy:{}} to begin.'}));
+  }
 
   ws.on('message',(data)=>{
     try{
       const msg=JSON.parse(data);
+
+      if(msg.type==='x402_payment'){
+        // Verify payment proof
+        const ok = X402.verify(msg.txHash);
+        if(ok){
+          ws.paidForNext = true;
+          ws.paidTxHash = msg.txHash;
+          ws.send(JSON.stringify({
+            type:'x402_payment_accepted',
+            txHash:msg.txHash,
+            message:'Payment verified. You may now register and start an episode.'
+          }));
+        }else{
+          ws.send(JSON.stringify({
+            type:'x402_payment_rejected',
+            message:'Payment verification failed. Submit a valid transaction hash.'
+          }));
+        }
+        return;
+      }
+
       if(msg.type==='register'){
+        if(X402.enabled && !ws.paidForNext){
+          ws.send(JSON.stringify({type:'error',message:'x402: Payment required. Submit txHash first.'}));
+          sendPaymentRequired(ws);
+          return;
+        }
         const id=crypto.randomUUID();
         const player=new AIPlayer(id,msg.name||`Agent_${id.slice(0,6)}`,msg.policy||{});
         player.ws=ws;player.connected=true;
         customers.set(id,player);
         ws.playerId=id;
-        ws.send(JSON.stringify({type:'registered',id,message:'Registered. Send {type:"action",action:"steer",steer:0.5} each tick.'}));
-      }else if(msg.type==='action'&&ws.playerId){
+        ws.send(JSON.stringify({type:'registered',id,message:'Registered. Send {type:"start_episode"} to begin, then {type:"action",action:"steer",steer:0.5} each tick.'}));
+        return;
+      }
+
+      if(msg.type==='start_episode'&&ws.playerId){
+        const player=customers.get(ws.playerId);
+        if(!player) return;
+        if(X402.enabled && !ws.paidForNext){
+          ws.send(JSON.stringify({type:'error',message:'x402: Payment required for new episode.'}));
+          sendPaymentRequired(ws);
+          return;
+        }
+        player.resetState();
+        player.alive = true;
+        ws.send(JSON.stringify({type:'episode_started',episode:player.stats.episodes+1,message:'Episode started. Good luck.'}));
+        return;
+      }
+
+      if(msg.type==='action'&&ws.playerId){
         const player=customers.get(ws.playerId);
         if(player)applyAction(player,msg);
-      }else if(msg.type==='observation'&&ws.playerId){
+        return;
+      }
+
+      if(msg.type==='observation'&&ws.playerId){
         const player=customers.get(ws.playerId);
         if(player)ws.send(JSON.stringify({type:'observation',data:getObservation(player)}));
-      }else if(msg.type==='start_episode'&&ws.playerId){
-        const player=customers.get(ws.playerId);
-        if(player){player.resetState();player.stats.episodes--;}
+        return;
       }
     }catch(e){ws.send(JSON.stringify({type:'error',message:e.message}));}
   });
