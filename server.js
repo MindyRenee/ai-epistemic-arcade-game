@@ -78,7 +78,7 @@ function initW(rows,cols){return Array.from({length:rows},()=>Array.from({length
 function initB(dim){return Array.from({length:dim},()=>0);}
 
 const Wemb = initW(V, D);          // [V x D]
-const Wout = initW(D, V);          // [D x V]
+const Wout = initW(V, D);          // [V x D]
 const bOut = initB(V);
 
 const layers = [];
@@ -102,7 +102,7 @@ function layerNorm(x, gamma){
   const std=Math.sqrt(var_+1e-6);
   return x.map((v,i)=>((v-mu)/std)*gamma[i]);
 }
-function softmax(x){const mx=Math.max(...x);const ex=x.map(v=>Math.exp(v-mx));const s=ex.reduce((a,b)=>a+b,0);return ex.map(v=>v/s);}
+function softmax(x, temp=1.5){const mx=Math.max(...x);const ex=x.map(v=>Math.exp((v-mx)/temp));const s=ex.reduce((a,b)=>a+b,0);return ex.map(v=>v/s);}
 function gelu(x){return x.map(v=>v*0.5*(1+Math.tanh(0.7978845608*(v+0.044715*v*v*v))));}
 
 function attention(x, layer){
@@ -218,17 +218,17 @@ class GenerationSession {
       const specTokens=[];
       const specHidden=[];
       let safe=true;
-      let specH=this.hiddenStates[this.hiddenStates.length-1]||this.promptMean;
+      let prevH=this.hiddenStates[this.hiddenStates.length-1]||this.promptMean;
       for(let i=0;i<3;i++){
-        let h=specH;
+        let h=i===0?prevH:add(embed(specTokens[i-1]),this.promptMean);
         for(let l=0;l<L;l++)h=forwardLayer(h,layers[l]);
-        const lg=logits(h);
-        const probs=softmax(lg);
+        const lg=logits(h.map(v=>v+(Math.random()-0.5)*4.0));
+        const probs=softmax(lg,5.0);
         const nextId=sample(probs);
         specTokens.push(nextId);
         specHidden.push(h);
         if(isInBasin(h)){safe=false;this.basinHits++;break;}
-        specH=h;
+        prevH=h;
       }
       this.planTokens=specTokens;
       const lastPlanH=specHidden[specHidden.length-1]||this.promptMean;
@@ -258,11 +258,11 @@ class GenerationSession {
     this.halted=false;
     this.planning=false;
 
-    // Forward pass for one token — autoregressive from last hidden state
-    let h=this.tokens.length===0?this.promptMean:this.hiddenStates[this.hiddenStates.length-1];
+    // Forward pass for one token — autoregressive from previous token embedding
+    let h=this.tokens.length===0?this.promptMean:add(embed(this.tokens[this.tokens.length-1]),this.promptMean);
     for(let l=0;l<L;l++)h=forwardLayer(h,layers[l]);
-    const lg=logits(h);
-    const probs=softmax(lg);
+    const lg=logits(h.map(v=>v+(Math.random()-0.5)*4.0));
+    const probs=softmax(lg,5.0);
     tokenId=sample(probs);
     hidden=h;
 
