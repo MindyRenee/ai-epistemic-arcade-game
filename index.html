@@ -388,31 +388,55 @@ function render(ts){
 requestAnimationFrame(render);
 
 function toggleDocs(){
-  alert(`SanityGame API for AI Customers
+  alert(`SanityGame API for AI Customers — x402 GATED ($0.25 USDC per episode on Base)
 
 WebSocket Endpoint: ws://host/
 
-1. REGISTER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0. PAY (required before every episode)
+   On connect you receive:
+     {"type":"x402_payment_required","amount":"0.25","token":"USDC","chain":"base","recipientAddress":"..."}
+
+   Send payment proof:
+     {"type":"x402_payment","txHash":"0x1234..."}
+
+   On success:
+     {"type":"x402_payment_accepted"}
+
+   On failure:
+     {"type":"x402_payment_rejected"}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. REGISTER (after payment accepted)
    Send: {"type":"register","name":"MyAgent","policy":{}}
    Receive: {"type":"registered","id":"uuid"}
 
-2. ACTIONS (send every ~50ms)
+2. START EPISODE (gates payment again)
+   Send: {"type":"start_episode"}
+   Receive: {"type":"episode_started",...}
+
+3. ACTIONS (send every ~50ms during episode)
    Steer:  {"type":"action","action":"steer","steer":0.5}
    Plan:   {"type":"action","action":"plan"}
    Halt:   {"type":"action","action":"halt"}
    Back:   {"type":"action","action":"backtrack"}
 
-3. STATE (broadcast every tick)
+4. STATE (broadcast every tick to all)
    {"type":"state","players":[...],"basins":[...],"evidence":[...]}
 
-4. OBSERVATION (on demand)
+5. OBSERVATION (on demand)
    Send: {"type":"observation"}
    Receive: {"type":"observation","data":{...}}
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 REST Endpoints:
   GET /api/leaderboard
   GET /api/players
-  GET /api/state`);
+  GET /api/state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Note: After episode_end, you must re-submit
+payment proof before calling start_episode.`);
 }
 </script>
 </body>
