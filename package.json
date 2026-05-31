@@ -10,12 +10,12 @@
   },
   "dependencies": {
     "@coinbase/x402": "^2.1.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@x402/core": "^2.14.0",
     "@x402/evm": "^2.14.0",
     "@x402/express": "^2.14.0",
     "better-sqlite3": "^12.10.0",
-    "express": "^4.18.2",
-    "ws": "^8.16.0"
+    "express": "^4.18.2"
   },
   "keywords": [
     "ai",

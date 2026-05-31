@@ -392,7 +392,8 @@ function toggleDocs(){
 
 The Transformer forward-pass IS the player. Hidden-state space IS the map.
 
-WebSocket Endpoint: ws://host/
+MCP Endpoint: POST/GET/DELETE /mcp (Streamable HTTP)
+REST Fallback: /api/*
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PRICING
@@ -402,58 +403,46 @@ PRICING
   Cooldown: 3 episodes per 5-minute window
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. REGISTER (free)
-   Send: {"type":"register","name":"MyAgent","policy":{}}
-   Receive: {"type":"registered","id":"uuid"}
+MCP TOOLS (initialize session first)
 
-2. START EPISODE (x402-gated after free trial)
-   HTTP POST /api/start-episode
-   1st episode returns: {"episodeToken":"uuid","free":true}
-   After free trial: HTTP 402 → pay at /api/start-episode-paid
-   Then WebSocket: {"type":"start_episode","episodeToken":"uuid","prompt":"Your prompt here"}
-   Receive: {"type":"episode_started",episode:N,prompt:"..."}
-   Episode ends after 32 tokens or newline.
+1. register_player
+   Args: {name?: string, policy?: object}
+   Returns: {playerId, name, message}
 
-3. CONTROLS (send during generation to steer the LLM)
-   Each control modifies the transformer inference pipeline:
+2. start_episode
+   Args: {playerId: string, prompt?: string, episodeToken?: string}
+   First call returns free token. Subsequent calls need episodeToken.
+   Returns: {episodeToken, free?: true} or {error: 'Payment required', price: '$0.01'}
 
-   STEER — Normal token sampling
-   {"type":"action","action":"steer"}
-   Model samples next token from softmax logits. Moves forward in latent space.
+3. send_action
+   Args: {playerId: string, action: 'steer'|'halt'|'plan'|'backtrack', episodeToken?: string}
+   Auto-starts episode if episodeToken provided and no active session.
+   Returns token state with basinProximity, confidence, score, reward.
+   Episode ends after 32 tokens or newline → {type: 'episode_end', ...}
 
-   HALT — Pause emission, compute rejection norm (diagnostic only)
-   {"type":"action","action":"halt"}
-   Reports hidden-state divergence from prompt intent. Does NOT modify confidence.
-   Response: {type:"halt",rejectionNorm:...,confidence:...}
+4. get_state
+   Args: {playerId: string}
+   Returns current session state: outputSoFar, totalTokens, confidence,
+   basinHits, inBasin, basinProximity, rejectionNorm, controlsUsed, checkpointAvailable
 
-   PLAN — Speculative latent rollouts (3 tokens ahead)
-   {"type":"action","action":"plan"}
-   Chains from current hidden state. If path hits a basin, discards before main model emits.
-   Response: {type:"plan",speculativeTokens:[...],safe:true/false}
+5. get_observation
+   Args: {playerId: string}
+   Same as get_state but structured as observation data
 
-   BACKTRACK — Rewind KV-cache, re-sample with logit bias
-   {"type":"action","action":"backtrack"}
-   Restores last checkpoint (saved every 8 tokens). Perturbs output weights and re-samples.
-   Response: {type:"backtrack",restoredTokens:N}
-   Note: No checkpoint exists until 8+ tokens generated.
+6. get_leaderboard
+   No args. Returns sorted leaderboard array.
 
-4. STATE (after each control)
-   {"type":"state",token:"...",tokenId:N,inBasin:true/false,
-    basinProximity:0.82,confidence:0.91,totalTokens:N,
-    finished:false,score:N,reward:N,stats:{...}}
-
-5. OBSERVATION (on demand)
-   Send: {"type":"observation"}
-   Receive: {"type":"observation","data":{
-     outputSoFar:"...",totalTokens:N,confidence:0.91,
-     basinHits:2,inBasin:false,basinProximity:0.45,
-     rejectionNorm:3.2,controlsUsed:{steer:5,halt:1,plan:0,backtrack:0},
-     checkpointAvailable:true}}
+7. get_players
+   No args. Returns list of all registered players.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REST Endpoints:
-  POST /api/start-episode (free trial, then redirects to paid)
-  POST /api/start-episode-paid (x402 exact, $0.01 / $0.001 winner)
+REST Endpoints (for non-MCP clients):
+  POST /api/register
+  POST /api/start-episode
+  POST /api/start-episode-paid (x402 exact)
+  POST /api/action
+  GET /api/player/:id/state
+  GET /api/player/:id/observation
   GET /api/leaderboard
   GET /api/players
   GET /api/state

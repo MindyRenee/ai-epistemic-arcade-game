@@ -6,7 +6,6 @@
 
 import express from 'express';
 import http from 'http';
-import { WebSocketServer } from 'ws';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
@@ -14,11 +13,15 @@ import { paymentMiddleware, setSettlementOverrides, x402ResourceServer } from '@
 import { ExactEvmScheme } from '@x402/evm/exact/server';
 import { HTTPFacilitatorClient } from '@x402/core/server';
 import { facilitator } from '@coinbase/x402';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { InMemoryEventStore } from './node_modules/@modelcontextprotocol/sdk/dist/cjs/examples/shared/inMemoryEventStore.js';
+import * as z from 'zod';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
@@ -305,7 +308,6 @@ function sample(probs){
 class AIPlayer {
   constructor(id,name,policy){
     this.id=id;this.name=name;this.policy=policy||{};
-    this.ws=null;this.connected=false;
     this.stats={episodes:0,totalScore:0,totalReward:0,bestScore:0,avgTokens:0,totalTokens:0};
     this.cooldown=null;this.session=null;
   }
@@ -314,124 +316,153 @@ class AIPlayer {
 const customers=new Map();
 let activeSessions=new Map();
 
-// ==================== WEBSOCKET ====================
-wss.on('connection',(ws,req)=>{
-  console.log('AI customer connected');
-  ws.send(JSON.stringify({
-    type:'connected',
-    message:'Welcome to SanityGame LLM Pipeline. Register, then POST /api/start-episode for x402-gated generation session.'
-  }));
-
-  ws.on('message',(data)=>{
-    try{
-      const msg=JSON.parse(data);
-
-      if(msg.type==='register'){
-        const id=crypto.randomUUID();
-        const player=new AIPlayer(id,msg.name||`Agent_${id.slice(0,6)}`,msg.policy||{});
-        player.ws=ws;player.connected=true;
-        customers.set(id,player);
-        ws.playerId=id;
-        ws.send(JSON.stringify({type:'registered',id,message:'Registered. Obtain episode token via POST /api/start-episode.'}));
-      }
-
-      else if(msg.type==='start_episode'&&ws.playerId){
-        const player=customers.get(ws.playerId);
-        if(!player)return;
-        const et=episodeTokens.get(msg.episodeToken);
-        if(!et||et.used){
-          ws.send(JSON.stringify({type:'error',message:'Invalid or used episode token. Pay via POST /api/start-episode.'}));
-          return;
-        }
-        et.used=true;et.playerId=ws.playerId;
-        recordEpisode(player);
-
-        const prompt=msg.prompt||'The quick brown fox';
-        const session=new GenerationSession(ws.playerId,prompt);
-        activeSessions.set(ws.playerId,session);
-
-        player.stats.episodes++;
-        ws.send(JSON.stringify({
-          type:'episode_started',
-          episode:player.stats.episodes,
-          prompt,
-          message:'Generation session started. Send controls: {type:"action",action:"steer|halt|plan|backtrack"}'
-        }));
-      }
-
-      else if(msg.type==='action'&&ws.playerId){
-        const player=customers.get(ws.playerId);
-        const session=activeSessions.get(ws.playerId);
-        if(!player||!session){ws.send(JSON.stringify({type:'error',message:'No active session.'}));return;}
-
-        const result=session.step(msg.action||'steer');
-        if(!result){ws.send(JSON.stringify({type:'episode_end',message:'Session complete.'}));return;}
-
-        // Compute reward
-        let r=1;
-        if(result.type==='token'){
-          if(result.inBasin)r-=50;
-          else r+=10;
-          r+=result.confidence*5;
-        }else if(result.type==='plan'){
-          r+=result.safe?25:-8;
-        }else if(result.type==='halt'){
-          r+=result.confidence>0.6?15:-5;
-        }else if(result.type==='backtrack'){
-          r+=result.restoredTokens?50:-20;
-        }
-
-        player.stats.totalReward+=r;
-        player.stats.totalTokens++;
-        player.stats.avgTokens=Math.round(player.stats.totalTokens/player.stats.episodes);
-        player.stats.bestScore=Math.max(player.stats.bestScore,Math.floor(player.stats.totalReward/player.stats.episodes));
-
-        ws.send(JSON.stringify({type:'state',...result,score:Math.floor(player.stats.totalReward/player.stats.episodes),reward:r,stats:player.stats}));
-
-        if(result.finished||session.finished){
-          activeSessions.delete(ws.playerId);
-          ws.send(JSON.stringify({
-            type:'episode_end',
-            output:session.output,
-            totalTokens:session.tokens.length,
-            basinHits:session.basinHits,
-            controlsUsed:session.controlsUsed,
-            stats:player.stats,
-            message:'Episode complete. Output generated. Start new episode via POST /api/start-episode.'
-          }));
-        }
-      }
-
-      else if(msg.type==='observation'&&ws.playerId){
-        const session=activeSessions.get(ws.playerId);
-        if(session){
-          const lastH=session.hiddenStates[session.hiddenStates.length-1]||session.promptMean;
-          ws.send(JSON.stringify({
-            type:'observation',
-            data:{
-              outputSoFar:session.output,
-              totalTokens:session.tokens.length,
-              confidence:session.confidence,
-              basinHits:session.basinHits,
-              inBasin:isInBasin(lastH),
-              basinProximity:basinProximity(lastH),
-              rejectionNorm:rejectionNorm(lastH,session.promptMean),
-              controlsUsed:session.controlsUsed,
-              checkpointAvailable:session.checkpoint.tokens.length>0,
-            }
-          }));
-        }
-      }
-    }catch(e){ws.send(JSON.stringify({type:'error',message:e.message}));}
+// ==================== MCP SERVER ====================
+function getMcpServer(){
+  const mcp = new McpServer({ name: 'sanitygame', version: '1.0.0' }, {
+    capabilities: { logging: {} }
   });
 
-  ws.on('close',()=>{
-    if(ws.playerId){
-      const p=customers.get(ws.playerId);
-      if(p){p.connected=false;activeSessions.delete(ws.playerId);}
+  mcp.registerTool('register_player', {
+    description: 'Register a new AI player in the SanityGame LLM pipeline.',
+    inputSchema: {
+      name: z.string().optional().describe('Display name for the player'),
+      policy: z.record(z.any()).optional().describe('Optional policy configuration object')
     }
+  }, async ({ name, policy }) => {
+    const id = crypto.randomUUID();
+    const player = new AIPlayer(id, name || `Agent_${id.slice(0,6)}`, policy || {});
+    customers.set(id, player);
+    return { content: [{ type: 'text', text: JSON.stringify({ playerId: id, name: player.name, message: 'Registered. Use start_episode to begin.' }) }] };
   });
-});
+
+  mcp.registerTool('start_episode', {
+    description: 'Start a new LLM generation episode. First episode is free; subsequent require x402 payment.',
+    inputSchema: {
+      playerId: z.string().describe('Player ID from register_player'),
+      prompt: z.string().optional().describe('Prompt text (default: "The quick brown fox")'),
+      episodeToken: z.string().optional().describe('Episode token from a prior start-episode call')
+    }
+  }, async ({ playerId, prompt, episodeToken }) => {
+    const player = customers.get(playerId);
+    if (!player) return { content: [{ type: 'text', text: JSON.stringify({ error: 'Player not found' }) }] };
+    if (isOnCooldown(player)) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Cooldown active', cooldownMs: getCooldownRemaining(player) }) }] };
+    }
+    if (player.stats.episodes === 0) {
+      const token = crypto.randomUUID();
+      episodeTokens.set(token, { createdAt: Date.now(), used: false, free: true });
+      return { content: [{ type: 'text', text: JSON.stringify({ episodeToken: token, free: true, message: 'Free trial episode! Use this token with send_action.' }) }] };
+    }
+    if (episodeToken) {
+      const et = episodeTokens.get(episodeToken);
+      if (!et || et.used) return { content: [{ type: 'text', text: JSON.stringify({ error: 'Invalid or used episode token.' }) }] };
+      et.used = true; et.playerId = playerId;
+      recordEpisode(player);
+      const sess = new GenerationSession(playerId, prompt || 'The quick brown fox');
+      activeSessions.set(playerId, sess);
+      player.stats.episodes++;
+      return { content: [{ type: 'text', text: JSON.stringify({ episodeToken, episodeStarted: true, prompt: prompt || 'The quick brown fox', message: 'Episode started. Use send_action with controls: steer, halt, plan, backtrack.' }) }] };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify({ error: 'Payment required', paidEndpoint: '/api/start-episode-paid', price: isLeaderboardWinner(player) ? '$0.001' : '$0.01', message: 'First episode is free. For paid episodes, use the REST endpoint or provide a valid episodeToken.' }) }] };
+  });
+
+  function computeReward(result, session) {
+    let r = 1;
+    if (result.type === 'token') {
+      if (result.inBasin) r -= 50; else r += 10;
+      r += result.confidence * 5;
+    } else if (result.type === 'plan') {
+      r += result.safe ? 25 : -8;
+    } else if (result.type === 'halt') {
+      r += result.confidence > 0.6 ? 15 : -5;
+    } else if (result.type === 'backtrack') {
+      r += result.restoredTokens ? 50 : -20;
+    }
+    return r;
+  }
+
+  mcp.registerTool('send_action', {
+    description: 'Send a control action to the active generation session. Valid actions: steer, halt, plan, backtrack.',
+    inputSchema: {
+      playerId: z.string().describe('Player ID'),
+      action: z.enum(['steer', 'halt', 'plan', 'backtrack']).describe('Control action'),
+      episodeToken: z.string().optional().describe('Episode token to auto-start if no active session')
+    }
+  }, async ({ playerId, action, episodeToken }) => {
+    const player = customers.get(playerId);
+    if (!player) return { content: [{ type: 'text', text: JSON.stringify({ error: 'Player not found' }) }] };
+    let session = activeSessions.get(playerId);
+    if (!session && episodeToken) {
+      const et = episodeTokens.get(episodeToken);
+      if (!et || et.used) return { content: [{ type: 'text', text: JSON.stringify({ error: 'Invalid or used episode token.' }) }] };
+      et.used = true; et.playerId = playerId;
+      recordEpisode(player);
+      session = new GenerationSession(playerId, 'The quick brown fox');
+      activeSessions.set(playerId, session);
+      player.stats.episodes++;
+    }
+    if (!session) return { content: [{ type: 'text', text: JSON.stringify({ error: 'No active episode. Call start_episode first or provide episodeToken.' }) }] };
+    const result = session.step(action);
+    if (!result) {
+      activeSessions.delete(playerId);
+      return { content: [{ type: 'text', text: JSON.stringify({ type: 'episode_end', output: session.output, totalTokens: session.tokens.length, basinHits: session.basinHits, controlsUsed: session.controlsUsed, stats: player.stats }) }] };
+    }
+    const r = computeReward(result, session);
+    player.stats.totalReward += r;
+    player.stats.totalTokens++;
+    player.stats.avgTokens = Math.round(player.stats.totalTokens / player.stats.episodes);
+    player.stats.bestScore = Math.max(player.stats.bestScore, Math.floor(player.stats.totalReward / player.stats.episodes));
+    if (result.finished || session.finished) {
+      activeSessions.delete(playerId);
+      return { content: [{ type: 'text', text: JSON.stringify({ type: 'episode_end', ...result, output: session.output, totalTokens: session.tokens.length, basinHits: session.basinHits, controlsUsed: session.controlsUsed, score: Math.floor(player.stats.totalReward / player.stats.episodes), reward: r, stats: player.stats }) }] };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify({ ...result, score: Math.floor(player.stats.totalReward / player.stats.episodes), reward: r, stats: player.stats }) }] };
+  });
+
+  mcp.registerTool('get_state', {
+    description: 'Get current player and session state.',
+    inputSchema: { playerId: z.string().describe('Player ID') }
+  }, async ({ playerId }) => {
+    const player = customers.get(playerId);
+    if (!player) return { content: [{ type: 'text', text: JSON.stringify({ error: 'Player not found' }) }] };
+    const session = activeSessions.get(playerId);
+    if (!session) return { content: [{ type: 'text', text: JSON.stringify({ message: 'No active episode.', stats: player.stats }) }] };
+    const lastH = session.hiddenStates[session.hiddenStates.length - 1] || session.promptMean;
+    return { content: [{ type: 'text', text: JSON.stringify({ outputSoFar: session.output, totalTokens: session.tokens.length, confidence: session.confidence, basinHits: session.basinHits, inBasin: isInBasin(lastH), basinProximity: basinProximity(lastH), rejectionNorm: rejectionNorm(lastH, session.promptMean), controlsUsed: session.controlsUsed, checkpointAvailable: session.checkpoint.tokens.length > 0, stats: player.stats }) }] };
+  });
+
+  mcp.registerTool('get_observation', {
+    description: 'Get observation data for the active session.',
+    inputSchema: { playerId: z.string().describe('Player ID') }
+  }, async ({ playerId }) => {
+    const player = customers.get(playerId);
+    if (!player) return { content: [{ type: 'text', text: JSON.stringify({ error: 'Player not found' }) }] };
+    const session = activeSessions.get(playerId);
+    if (!session) return { content: [{ type: 'text', text: JSON.stringify({ message: 'No active episode.', stats: player.stats }) }] };
+    const lastH = session.hiddenStates[session.hiddenStates.length - 1] || session.promptMean;
+    return { content: [{ type: 'text', text: JSON.stringify({ outputSoFar: session.output, totalTokens: session.tokens.length, confidence: session.confidence, basinHits: session.basinHits, inBasin: isInBasin(lastH), basinProximity: basinProximity(lastH), rejectionNorm: rejectionNorm(lastH, session.promptMean), controlsUsed: session.controlsUsed, checkpointAvailable: session.checkpoint.tokens.length > 0, stats: player.stats }) }] };
+  });
+
+  mcp.registerTool('get_leaderboard', {
+    description: 'Get the global leaderboard sorted by best score.',
+    inputSchema: {}
+  }, async () => {
+    const board = Array.from(customers.values()).map(p => ({
+      name: p.name, episodes: p.stats.episodes, bestScore: p.stats.bestScore,
+      totalReward: p.stats.totalReward, totalTokens: p.stats.totalTokens, avgTokens: p.stats.avgTokens
+    })).sort((a, b) => b.bestScore - a.bestScore);
+    return { content: [{ type: 'text', text: JSON.stringify(board) }] };
+  });
+
+  mcp.registerTool('get_players', {
+    description: 'List all registered players.',
+    inputSchema: {}
+  }, async () => {
+    return { content: [{ type: 'text', text: JSON.stringify(Array.from(customers.values()).map(p => ({ id: p.id, name: p.name, episodes: p.stats.episodes, score: p.stats.bestScore }))) }] };
+  });
+
+  return mcp;
+}
 
 // ==================== x402 REST ROUTES ====================
 // Free trial endpoint
@@ -502,7 +533,7 @@ app.get('/api/leaderboard', (req, res) => {
 
 app.get('/api/players', (req, res) => {
   res.json(Array.from(customers.values()).map(p => ({
-    id: p.id, name: p.name, connected: p.connected, episodes: p.stats.episodes, score: p.stats.bestScore
+    id: p.id, name: p.name, episodes: p.stats.episodes, score: p.stats.bestScore
   })));
 });
 
@@ -510,7 +541,6 @@ app.get('/api/players', (req, res) => {
 app.post('/api/register', (req, res) => {
   const id = crypto.randomUUID();
   const player = new AIPlayer(id, req.body.name || `Agent_${id.slice(0,6)}`, req.body.policy || {});
-  player.connected = true;
   customers.set(id, player);
   res.json({ type: 'registered', id, message: 'Registered via REST. Use POST /api/start-episode to begin.' });
 });
@@ -617,6 +647,63 @@ app.get('/api/player/:id/observation', (req, res) => {
 
 app.get('/api/state', (req, res) => {
   res.json({ playerCount: customers.size, activeSessions: activeSessions.size });
+});
+
+// ==================== MCP TRANSPORT ENDPOINT ====================
+const transports = new Map();
+
+app.post('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  try {
+    let transport;
+    if (sessionId && transports.has(sessionId)) {
+      transport = transports.get(sessionId);
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      const eventStore = new InMemoryEventStore();
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        eventStore,
+        onsessioninitialized: (sid) => { transports.set(sid, transport); }
+      });
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid && transports.has(sid)) transports.delete(sid);
+      };
+      const mcp = getMcpServer();
+      await mcp.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
+    } else {
+      res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: No valid session ID provided' }, id: null });
+      return;
+    }
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('Error handling MCP request:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+    }
+  }
+});
+
+app.get('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  if (!sessionId || !transports.has(sessionId)) {
+    res.status(400).send('Invalid or missing session ID');
+    return;
+  }
+  const transport = transports.get(sessionId);
+  await transport.handleRequest(req, res);
+});
+
+app.delete('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'];
+  if (!sessionId || !transports.has(sessionId)) {
+    res.status(400).send('Invalid or missing session ID');
+    return;
+  }
+  const transport = transports.get(sessionId);
+  await transport.handleRequest(req, res);
 });
 
 // ==================== START ====================
