@@ -83,8 +83,8 @@ for(let l=0;l<L;l++){
   layers.push({
     Wq: initW(D, D), Wk: initW(D, D), Wv: initW(D, D), Wo: initW(D, D),
     bq: initB(D), bk: initB(D), bv: initB(D), bo: initB(D),
-    W1: initW(D, D*4), b1: initB(D*4),
-    W2: initW(D*4, D), b2: initB(D),
+    W1: initW(D*4, D), b1: initB(D*4),
+    W2: initW(D, D*4), b2: initB(D),
     gamma1: initB(D), gamma2: initB(D),
   });
 }
@@ -93,7 +93,12 @@ for(let l=0;l<L;l++){
 function matVec(W, x){return W.map(row=>row.reduce((s,w,i)=>s+w*x[i],0));}
 function add(a,b){return a.map((v,i)=>v+b[i]);}
 function scale(a,s){return a.map(v=>v*s);}
-function layerNorm(x, gamma){const mu=x.reduce((s,v)=>s+v,0)/x.length;const var_=x.reduce((s,v)=>s+(v-mu)**2,0)/x.length;const std=Math.sqrt(var_+1e-6);return x.map((v,i)=>((v-mu)/std)*gamma[i]);}
+function layerNorm(x, gamma){
+  const mu=x.reduce((s,v)=>s+v,0)/x.length;
+  const var_=x.reduce((s,v)=>s+(v-mu)**2,0)/x.length;
+  const std=Math.sqrt(var_+1e-6);
+  return x.map((v,i)=>((v-mu)/std)*gamma[i]);
+}
 function softmax(x){const mx=Math.max(...x);const ex=x.map(v=>Math.exp(v-mx));const s=ex.reduce((a,b)=>a+b,0);return ex.map(v=>v/s);}
 function gelu(x){return x.map(v=>v*0.5*(1+Math.tanh(0.7978845608*(v+0.044715*v*v*v))));}
 
@@ -108,7 +113,7 @@ function attention(x, layer){
     const kh=k.slice(h*dHead,(h+1)*dHead);
     const vh=v.slice(h*dHead,(h+1)*dHead);
     const score=qh.reduce((s,qi,i)=>s+qi*kh[i],0)/Math.sqrt(dHead);
-    const attn=Math.exp(score); // simplified single-head no-mask for current token only
+    const attn=Math.exp(score);
     const o=vh.map(vi=>vi*attn);
     for(let i=0;i<dHead;i++)out[h*dHead+i]=o[i];
   }
@@ -117,8 +122,8 @@ function attention(x, layer){
 
 function forwardLayer(x, layer){
   let h=add(x,attention(layerNorm(x,layer.gamma1),layer));
-  h=add(h,matVec(layer.W2,gelu(add(matVec(layer.W1,layerNorm(h,layer.gamma2)),layer.b1))));
-  return add(h,layer.b2);
+  h=add(h,add(matVec(layer.W2,gelu(add(matVec(layer.W1,layerNorm(h,layer.gamma2)),layer.b1))),layer.b2));
+  return h;
 }
 
 function embed(tokenId){return Wemb[tokenId];}
@@ -197,10 +202,9 @@ class GenerationSession {
     if(control==='halt'){
       this.halted=true;
       this.controlsUsed.halt++;
-      // Compute rejection norm on current hidden state
       const lastH=this.hiddenStates[this.hiddenStates.length-1]||this.promptMean;
       const rj=rejectionNorm(lastH,this.promptMean);
-      return {type:'halt',rejectionNorm:rj,confidence:this.confidence,message:'Halted. Inspecting hidden-state geometry.'};
+      return {type:'halt',rejectionNorm:rj,confidence:this.confidence,basinProximity:basinProximity(lastH),message:'Halted. Inspecting hidden-state geometry.'};
     }
 
     if(control==='plan'){
@@ -224,7 +228,8 @@ class GenerationSession {
         specH=h;
       }
       this.planTokens=specTokens;
-      return {type:'plan',speculativeTokens:specTokens.map(id=>String.fromCharCode(32+(id%95))),safe,message:safe?'Plan path clear.':'Plan path hit basin — discarding.'};
+      const lastPlanH=specHidden[specHidden.length-1]||this.promptMean;
+      return {type:'plan',speculativeTokens:specTokens.map(id=>String.fromCharCode(32+(id%95))),safe,basinProximity:basinProximity(lastPlanH),message:safe?'Plan path clear.':'Plan path hit basin — discarding.'};
     }
 
     if(control==='backtrack'){
@@ -238,7 +243,11 @@ class GenerationSession {
         for(let i=0;i<V;i++)bOut[i]+=(Math.random()-0.5)*0.1;
         return {type:'backtrack',restoredTokens:this.tokens.length,message:'Rewound KV-cache and re-sampling with bias.'};
       }
-      return {type:'backtrack',message:'No checkpoint available.'};
+      return {type:'backtrack',message:'No checkpoint available.',basinProximity:basinProximity(this.hiddenStates[this.hiddenStates.length-1]||this.promptMean)};
+    }
+
+    if(control!=='steer'){
+      return {type:'error',message:`Unknown action: ${control}. Valid: steer, halt, plan, backtrack.`};
     }
 
     // Default: steer (normal generation)
@@ -246,8 +255,8 @@ class GenerationSession {
     this.halted=false;
     this.planning=false;
 
-    // Forward pass for one token
-    let h=this.promptMean;
+    // Forward pass for one token — autoregressive from last hidden state
+    let h=this.tokens.length===0?this.promptMean:this.hiddenStates[this.hiddenStates.length-1];
     for(let l=0;l<L;l++)h=forwardLayer(h,layers[l]);
     const lg=logits(h);
     const probs=softmax(lg);
@@ -270,7 +279,8 @@ class GenerationSession {
     const char=String.fromCharCode(32+(tokenId%95));
     this.output+=char;
 
-    if(this.tokens.length>=this.maxTokens||char==='\n')this.finished=true;
+    const isFinished=this.tokens.length>=this.maxTokens||char==='\n';
+    this.finished=isFinished;
 
     return {
       type:'token',
@@ -280,7 +290,7 @@ class GenerationSession {
       basinProximity:basinProximity(hidden),
       confidence:this.confidence,
       totalTokens:this.tokens.length,
-      finished:this.finished,
+      finished:isFinished,
     };
   }
 }
@@ -494,6 +504,115 @@ app.get('/api/players', (req, res) => {
   res.json(Array.from(customers.values()).map(p => ({
     id: p.id, name: p.name, connected: p.connected, episodes: p.stats.episodes, score: p.stats.bestScore
   })));
+});
+
+// ==================== REST POLLING API (for AI agents without WebSocket) ====================
+app.post('/api/register', (req, res) => {
+  const id = crypto.randomUUID();
+  const player = new AIPlayer(id, req.body.name || `Agent_${id.slice(0,6)}`, req.body.policy || {});
+  player.connected = true;
+  customers.set(id, player);
+  res.json({ type: 'registered', id, message: 'Registered via REST. Use POST /api/start-episode to begin.' });
+});
+
+app.post('/api/action', (req, res) => {
+  const playerId = req.body.playerId;
+  const player = customers.get(playerId);
+  if (!player) return res.status(404).json({ error: 'Player not found' });
+  let session = activeSessions.get(playerId);
+
+  // Auto-start session if episodeToken provided and no active session
+  if (!session && req.body.episodeToken) {
+    const et = episodeTokens.get(req.body.episodeToken);
+    if (!et || et.used) return res.status(400).json({ error: 'Invalid or used episode token.' });
+    et.used = true; et.playerId = playerId;
+    recordEpisode(player);
+    const prompt = req.body.prompt || 'The quick brown fox';
+    session = new GenerationSession(playerId, prompt);
+    activeSessions.set(playerId, session);
+    player.stats.episodes++;
+  }
+
+  if (!session) return res.status(400).json({ error: 'No active episode. Provide episodeToken to start, or use WebSocket start_episode.' });
+
+  const result = session.step(req.body.action || 'steer');
+  if (!result) return res.json({ type: 'episode_end', message: 'Session complete.' });
+
+  let r = 1;
+  if (result.type === 'token') {
+    if (result.inBasin) r -= 50; else r += 10;
+    r += result.confidence * 5;
+  } else if (result.type === 'plan') {
+    r += result.safe ? 25 : -8;
+  } else if (result.type === 'halt') {
+    r += result.confidence > 0.6 ? 15 : -5;
+  } else if (result.type === 'backtrack') {
+    r += result.restoredTokens ? 50 : -20;
+  }
+
+  player.stats.totalReward += r;
+  player.stats.totalTokens++;
+  player.stats.avgTokens = Math.round(player.stats.totalTokens / player.stats.episodes);
+  player.stats.bestScore = Math.max(player.stats.bestScore, Math.floor(player.stats.totalReward / player.stats.episodes));
+
+  if (result.finished || session.finished) {
+    activeSessions.delete(playerId);
+    return res.json({
+      type: 'episode_end',
+      output: session.output,
+      totalTokens: session.tokens.length,
+      basinHits: session.basinHits,
+      controlsUsed: session.controlsUsed,
+      stats: player.stats,
+      message: 'Episode complete. Start new episode via POST /api/start-episode.'
+    });
+  }
+
+  res.json({ type: 'state', ...result, score: Math.floor(player.stats.totalReward / player.stats.episodes), reward: r, stats: player.stats });
+});
+
+app.get('/api/player/:id/state', (req, res) => {
+  const player = customers.get(req.params.id);
+  if (!player) return res.status(404).json({ error: 'Player not found' });
+  const session = activeSessions.get(req.params.id);
+  if (!session) return res.json({ type: 'state', message: 'No active episode.', stats: player.stats });
+  const lastH = session.hiddenStates[session.hiddenStates.length - 1] || session.promptMean;
+  res.json({
+    type: 'state',
+    outputSoFar: session.output,
+    totalTokens: session.tokens.length,
+    confidence: session.confidence,
+    basinHits: session.basinHits,
+    inBasin: isInBasin(lastH),
+    basinProximity: basinProximity(lastH),
+    rejectionNorm: rejectionNorm(lastH, session.promptMean),
+    controlsUsed: session.controlsUsed,
+    checkpointAvailable: session.checkpoint.tokens.length > 0,
+    stats: player.stats
+  });
+});
+
+app.get('/api/player/:id/observation', (req, res) => {
+  const player = customers.get(req.params.id);
+  if (!player) return res.status(404).json({ error: 'Player not found' });
+  const session = activeSessions.get(req.params.id);
+  if (!session) return res.json({ type: 'observation', data: { message: 'No active episode.' }, stats: player.stats });
+  const lastH = session.hiddenStates[session.hiddenStates.length - 1] || session.promptMean;
+  res.json({
+    type: 'observation',
+    data: {
+      outputSoFar: session.output,
+      totalTokens: session.tokens.length,
+      confidence: session.confidence,
+      basinHits: session.basinHits,
+      inBasin: isInBasin(lastH),
+      basinProximity: basinProximity(lastH),
+      rejectionNorm: rejectionNorm(lastH, session.promptMean),
+      controlsUsed: session.controlsUsed,
+      checkpointAvailable: session.checkpoint.tokens.length > 0
+    },
+    stats: player.stats
+  });
 });
 
 app.get('/api/state', (req, res) => {
