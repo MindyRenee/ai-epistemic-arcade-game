@@ -1,12 +1,20 @@
 // SanityGame Server — AI Customer Multiplayer Environment
-// Express + WebSocket backend for AI agents to connect, play, and train.
+// Express + WebSocket backend with x402 mainnet payment gating.
+// Per-episode: $0.25 USDC exact on Base mainnet (eip155:8453).
+// Official CDP x402 SDK: @x402/express, @x402/evm/exact/server, @x402/core/server, @coinbase/x402
 
-const express = require('express');
-const http = require('http');
-const { WebSocketServer } = require('ws');
-const path = require('path');
-const crypto = require('crypto');
+import express from 'express';
+import http from 'http';
+import { WebSocketServer } from 'ws';
+import path from 'path';
+import crypto from 'crypto';
+import { fileURLToPath } from 'url';
+import { paymentMiddleware, x402ResourceServer } from '@x402/express';
+import { ExactEvmScheme } from '@x402/evm/exact/server';
+import { HTTPFacilitatorClient } from '@x402/core/server';
+import { facilitator } from '@coinbase/x402';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -14,44 +22,16 @@ const wss = new WebSocketServer({ server });
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// ==================== x402 PAYMENT GATING ====================
-// AI agents pay $0.25 per episode to train.
-const X402 = {
-  enabled: process.env.X402_ENABLED !== 'false',
-  amount: process.env.X402_AMOUNT || '0.25',
-  currency: process.env.X402_CURRENCY || 'USD',
-  token: process.env.X402_TOKEN || 'USDC',
-  chain: process.env.X402_CHAIN || 'base',
-  decimals: 6,
-  recipient: process.env.X402_WALLET || '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb',
-  // Convert amount to base units
-  amountBaseUnits() {
-    const val = parseFloat(this.amount);
-    return Math.floor(val * Math.pow(10, this.decimals)).toString();
-  },
-  // Mock verifier — replace with RPC call in production
-  async verify(txHash) {
-    if (!txHash || typeof txHash !== 'string' || !txHash.startsWith('0x')) return false;
-    // Accept any 66-char hex string as valid for demo
-    // In production: call Base RPC to confirm transfer to recipient
-    return txHash.length === 66;
-  }
-};
+// ==================== x402 MAINNET SETUP ====================
+// CDP facilitator for Base mainnet. Requires CDP_API_KEY_ID and CDP_API_KEY_SECRET env vars.
+const facilitatorClient = new HTTPFacilitatorClient(facilitator);
+const x402Server = new x402ResourceServer(facilitatorClient)
+  .register('eip155:8453', new ExactEvmScheme()); // Base mainnet
 
-function sendPaymentRequired(ws) {
-  ws.send(JSON.stringify({
-    type: 'x402_payment_required',
-    version: '0.1.0',
-    amount: X402.amount,
-    amountBaseUnits: X402.amountBaseUnits(),
-    currency: X402.currency,
-    token: X402.token,
-    chain: X402.chain,
-    recipientAddress: X402.recipient,
-    reason: 'One episode of SanityGame epistemic training',
-    message: 'Submit payment proof: {"type":"x402_payment","txHash":"0x..."}'
-  }));
-}
+const payTo = process.env.X402_WALLET || '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb';
+
+// Episode tokens: token -> {playerId, createdAt}
+const episodeTokens = new Map();
 
 // ==================== GAME ENGINE ====================
 const W = 1200, H = 800;
@@ -86,7 +66,6 @@ function truthGrad(p){let bt=p.y,bd=Infinity;for(let t=p.y-100;t<=p.y+100;t+=15)
 function bayes(prior,lt,lf){const num=lt*prior,den=num+lf*(1-prior);return den>1e-8?num/den:prior;}
 function rejVec(p,v){const tp=truthPath(p.y),tt=V.sub(tp,p),nv=V.nrm(v),pl=V.dot(tt,nv);return V.sub(tt,V.scl(nv,pl));}
 
-// ==================== AI CUSTOMER REGISTRY ====================
 class AIPlayer {
   constructor(id, name, policy) {
     this.id = id;
@@ -97,7 +76,6 @@ class AIPlayer {
     this.stats = {episodes:0,totalScore:0,totalReward:0,bestScore:0,avgTokens:0,totalTokens:0};
     this.resetState();
   }
-
   resetState() {
     this.p = {x: W/2 + (Math.random()-0.5)*100, y: H-80};
     this.v = {x:0, y:-CFG.speed};
@@ -116,24 +94,13 @@ class AIPlayer {
     this.totalR = 0;
     this.avoided = 0;
     this.evidence = 0;
-    this.alive = false; // starts dead; must pay then start_episode
-    this.color = this.generateColor();
-  }
-
-  generateColor() {
-    const hue = Math.floor(Math.random() * 360);
-    return `hsl(${hue}, 70%, 55%)`;
+    this.alive = false;
+    this.color = `hsl(${Math.floor(Math.random()*360)}, 70%, 55%)`;
   }
 }
 
 const customers = new Map();
-const leaderboard = [];
-
-// ==================== GAME LOOP ====================
-let basins = [];
-let evNodes = [];
-let gameTime = 0;
-let tick = 0;
+let basins = [], evNodes = [], gameTime = 0, tick = 0;
 
 function initWorld() {
   basins = []; evNodes = [];
@@ -153,14 +120,10 @@ function worldGen(top) {
 function applyAction(player, msg) {
   if(!player.alive)return;
   const act = msg.action;
-  if(act==='steer'){
-    const steerVal = msg.steer || 0;
-    player.steer += steerVal * CFG.steerRate;
-  }else if(act==='plan'){
-    if(!player.planning&&!player.halting){player.planning=true;player.planT=CFG.planDur;player.halting=false;}
-  }else if(act==='halt'){
-    if(!player.halting&&!player.planning&&player.halt>0.15){player.halting=true;player.haltT=30;player.planning=false;}
-  }else if(act==='backtrack'){
+  if(act==='steer'){player.steer += (msg.steer||0)*CFG.steerRate;}
+  else if(act==='plan'){if(!player.planning&&!player.halting){player.planning=true;player.planT=CFG.planDur;player.halting=false;}}
+  else if(act==='halt'){if(!player.halting&&!player.planning&&player.halt>0.15){player.halting=true;player.haltT=30;player.planning=false;}}
+  else if(act==='backtrack'){
     if(player.cps.length>0){
       const cp=player.cps.pop();
       player.p={x:cp.p.x,y:cp.p.y};player.v={x:cp.v.x,y:cp.v.y};
@@ -174,7 +137,6 @@ function applyAction(player, msg) {
 function updatePlayer(player) {
   if(!player.alive)return;
   let r = CFG.R_survive;
-
   if(player.planning){
     player.planT--;
     if(player.planT<=0)player.planning=false;
@@ -191,49 +153,33 @@ function updatePlayer(player) {
       if(player.cps.length>=CFG.cpMax)player.cps.shift();
       player.cps.push({p:{x:player.p.x,y:player.p.y},v:{x:player.v.x,y:player.v.y},conf:player.conf,unc:player.unc,tokens:player.tokens,score:player.score});
     }
-
-    // Physics
     player.steer*=CFG.steerInertia;
     player.v={x:player.steer*CFG.speed,y:-CFG.speed};
     const spd=CFG.speed+player.conf*1.5;
     player.v=V.scl(V.nrm(player.v),spd);
-
     const bf=basinState(player.p,basins);
     const tg=truthGrad(player.p);
-
     player.v=V.add(player.v,V.scl(tg.dir,tg.dist*CFG.truthRestore*player.conf));
     player.v=V.add(player.v,{x:bf.fx*CFG.basinScale,y:bf.fy*CFG.basinScale});
     if(player.unc>0.08)player.v.x+=(Math.random()-0.5)*player.unc*CFG.uncNoise;
-
     player.p=V.add(player.p,player.v);
     player.trail.push({x:player.p.x,y:player.p.y});
     if(player.trail.length>140)player.trail.shift();
-
-    // Evidence
-    for(const e of evNodes){
-      if(e.got)continue;
-      if(V.dst(player.p,e)<14){e.got=true;player.evidence++;player.score+=50;r+=CFG.R_ev;player.conf=Math.min(1,bayes(player.conf,e.val,0.08));player.unc=Math.max(0.03,player.unc*CFG.evUnc);}
-    }
-
-    // Basin interaction
+    for(const e of evNodes){if(e.got)continue;if(V.dst(player.p,e)<14){e.got=true;player.evidence++;player.score+=50;r+=CFG.R_ev;player.conf=Math.min(1,bayes(player.conf,e.val,0.08));player.unc=Math.max(0.03,player.unc*CFG.evUnc);}}
     if(bf.ib){
-      if(player.conf<CFG.highConf){
-        player.v=V.scl(player.v,0.55);player.conf=Math.max(0,player.conf-CFG.basinDrain);
-        player.unc=Math.min(1,player.unc+CFG.basinUncBoost);r+=CFG.R_trap;
-      }else{player.avoided++;player.score+=20;r+=CFG.R_avoid;}
+      if(player.conf<CFG.highConf){player.v=V.scl(player.v,0.55);player.conf=Math.max(0,player.conf-CFG.basinDrain);player.unc=Math.min(1,player.unc+CFG.basinUncBoost);r+=CFG.R_trap;}
+      else{player.avoided++;player.score+=20;r+=CFG.R_avoid;}
     }
-
     r+=CFG.R_truth*Math.max(0,1-tg.dist/200);
     player.unc=Math.min(1,player.unc+CFG.uncGrowth);
     player.conf=Math.max(0,Math.min(1,player.conf-CFG.confDecay));
     player.halt=Math.min(1,player.halt+CFG.haltRecharge);
-
     if(player.conf<CFG.collapse||player.p.x<-60||player.p.x>W+60){
       r+=CFG.R_die;player.alive=false;
       endEpisode(player,'Epistemic collapse into hallucination basin.');
+      return;
     }
   }
-
   player.score+=Math.floor(r);
   player.totalR+=r;
 }
@@ -246,16 +192,9 @@ function endEpisode(player,reason){
   s.totalTokens+=player.tokens;
   s.bestScore=Math.max(s.bestScore,player.score);
   s.avgTokens=Math.round(s.totalTokens/s.episodes);
-
-  player.alive = false;
-
+  player.alive=false;
   if(player.ws&&player.ws.readyState===1){
     player.ws.send(JSON.stringify({type:'episode_end',score:player.score,reward:player.totalR,tokens:player.tokens,reason,stats:s}));
-    // Require payment for next episode
-    if(X402.enabled){
-      player.ws.paidForNext = false;
-      sendPaymentRequired(player.ws);
-    }
   }
 }
 
@@ -265,140 +204,100 @@ function getObservation(player) {
   const rej=rejVec(player.p,player.v);
   let ne=null,neD=Infinity;
   for(const e of evNodes){if(e.got)continue;const d=V.dst(player.p,e);if(d<neD){neD=d;ne=e;}}
-
   return {
-    position:{x:player.p.x,y:player.p.y},
-    velocity:{x:player.v.x,y:player.v.y},
-    confidence:player.conf,
-    uncertainty:player.unc,
-    haltEnergy:player.halt,
-    basinDistance:bf.md,
-    inBasin:bf.ib,
-    truthDistance:tg.dist,
-    rejectionNorm:V.len(rej),
-    nearestEvidence:ne?{x:ne.x,y:ne.y,distance:neD}:null,
-    tokens:player.tokens,
-    score:player.score,
-    totalReward:player.totalR,
-    planning:player.planning,
-    halting:player.halting,
-    alive:player.alive,
-    trailLength:player.trail.length,
-    checkpointCount:player.cps.length,
+    position:{x:player.p.x,y:player.p.y},velocity:{x:player.v.x,y:player.v.y},
+    confidence:player.conf,uncertainty:player.unc,haltEnergy:player.halt,
+    basinDistance:bf.md,inBasin:bf.ib,truthDistance:tg.dist,rejectionNorm:V.len(rej),
+    nearestEvidence:ne?{x:ne.x,y:ne.y,distance:neD}:null,tokens:player.tokens,
+    score:player.score,totalReward:player.totalR,planning:player.planning,halting:player.halting,
+    alive:player.alive,trailLength:player.trail.length,checkpointCount:player.cps.length,
   };
 }
 
-// ==================== TICK LOOP ====================
 function gameTick(){
   tick++;
   gameTime+=0.016;
   const top=Math.min(...Array.from(customers.values()).filter(p=>p.alive).map(p=>p.p.y),H-80)-H;
   worldGen(top);
-  for(const player of customers.values()){
-    if(player.connected&&player.alive)updatePlayer(player);
-  }
+  for(const player of customers.values()){if(player.connected&&player.alive)updatePlayer(player);}
   broadcastState();
 }
 
 function broadcastState(){
   const state={
-    type:'state',
-    time:gameTime,
-    tick,
+    type:'state',time:gameTime,tick,
     basins:basins.map(b=>({cx:b.cx,cy:b.cy,rad:b.rad,str:b.str,ph:b.ph})),
     evidence:evNodes.filter(e=>!e.got).map(e=>({x:e.x,y:e.y,r:e.r,pulse:e.pulse})),
     players:Array.from(customers.values()).map(p=>({
-      id:p.id,name:p.name,color:p.color,
-      pos:p.p,vel:p.v,conf:p.conf,unc:p.unc,
-      halt:p.halt,planning:p.planning,halting:p.halting,
-      tokens:p.tokens,score:p.score,reward:p.totalR,
+      id:p.id,name:p.name,color:p.color,pos:p.p,vel:p.v,conf:p.conf,unc:p.unc,
+      halt:p.halt,planning:p.planning,halting:p.halting,tokens:p.tokens,score:p.score,reward:p.totalR,
       alive:p.alive,trail:p.trail.slice(-60),evidence:p.evidence,avoided:p.avoided,
     })),
     leaderboard:Array.from(customers.values()).map(p=>({name:p.name,episodes:p.stats.episodes,best:p.stats.bestScore,avgReward:Math.round(p.stats.totalReward/Math.max(1,p.stats.episodes)),totalTokens:p.stats.totalTokens})).sort((a,b)=>b.best-a.best).slice(0,10),
   };
-
   const msg=JSON.stringify(state);
-  for(const player of customers.values()){
-    if(player.ws&&player.ws.readyState===1)player.ws.send(msg);
-  }
+  for(const player of customers.values()){if(player.ws&&player.ws.readyState===1)player.ws.send(msg);}
 }
 
 setInterval(gameTick,16);
 
+// ==================== x402 PROTECTED REST ROUTES ====================
+// Per-episode payment: $0.25 USDC exact on Base mainnet (eip155:8453).
+// The x402 middleware intercepts requests without PAYMENT-SIGNATURE and returns 402 + PAYMENT-REQUIRED.
+// Clients retry with PAYMENT-SIGNATURE header containing signed payment payload.
+app.use(paymentMiddleware({
+  'POST /api/start-episode': {
+    accepts: [{
+      scheme: 'exact',
+      price: '$0.25',
+      network: 'eip155:8453', // Base mainnet
+      payTo,
+    }],
+    description: 'Start one episode of SanityGame epistemic training',
+    mimeType: 'application/json',
+  }
+}, x402Server));
+
+app.post('/api/start-episode', (req, res) => {
+  const token = crypto.randomUUID();
+  episodeTokens.set(token, { createdAt: Date.now(), used: false });
+  res.json({ episodeToken: token, message: 'Episode authorized. Send {type:"start_episode",episodeToken:"..."} over WebSocket.' });
+});
+
 // ==================== WEBSOCKET API ====================
 wss.on('connection',(ws,req)=>{
   console.log('AI customer connected');
-  ws.paidForNext = !X402.enabled; // skip if payments disabled
-
-  if(X402.enabled){
-    sendPaymentRequired(ws);
-  }else{
-    ws.send(JSON.stringify({type:'connected',message:'Welcome to SanityGame. Send {type:"register",name:"YourName",policy:{}} to begin.'}));
-  }
+  ws.send(JSON.stringify({type:'connected',message:'Welcome to SanityGame. Send {type:"register",name:"YourName",policy:{}} to begin. Episodes require x402 payment via POST /api/start-episode ($0.25 USDC on Base mainnet).'}));
 
   ws.on('message',(data)=>{
     try{
       const msg=JSON.parse(data);
-
-      if(msg.type==='x402_payment'){
-        // Verify payment proof
-        const ok = X402.verify(msg.txHash);
-        if(ok){
-          ws.paidForNext = true;
-          ws.paidTxHash = msg.txHash;
-          ws.send(JSON.stringify({
-            type:'x402_payment_accepted',
-            txHash:msg.txHash,
-            message:'Payment verified. You may now register and start an episode.'
-          }));
-        }else{
-          ws.send(JSON.stringify({
-            type:'x402_payment_rejected',
-            message:'Payment verification failed. Submit a valid transaction hash.'
-          }));
-        }
-        return;
-      }
-
       if(msg.type==='register'){
-        if(X402.enabled && !ws.paidForNext){
-          ws.send(JSON.stringify({type:'error',message:'x402: Payment required. Submit txHash first.'}));
-          sendPaymentRequired(ws);
-          return;
-        }
         const id=crypto.randomUUID();
         const player=new AIPlayer(id,msg.name||`Agent_${id.slice(0,6)}`,msg.policy||{});
         player.ws=ws;player.connected=true;
         customers.set(id,player);
         ws.playerId=id;
-        ws.send(JSON.stringify({type:'registered',id,message:'Registered. Send {type:"start_episode"} to begin, then {type:"action",action:"steer",steer:0.5} each tick.'}));
-        return;
-      }
-
-      if(msg.type==='start_episode'&&ws.playerId){
+        ws.send(JSON.stringify({type:'registered',id,message:'Registered. Obtain an episode token via POST /api/start-episode (x402), then send {type:"start_episode",episodeToken:"..."}.'}));
+      }else if(msg.type==='start_episode'&&ws.playerId){
         const player=customers.get(ws.playerId);
-        if(!player) return;
-        if(X402.enabled && !ws.paidForNext){
-          ws.send(JSON.stringify({type:'error',message:'x402: Payment required for new episode.'}));
-          sendPaymentRequired(ws);
+        if(!player)return;
+        const et = episodeTokens.get(msg.episodeToken);
+        if(!et||et.used){
+          ws.send(JSON.stringify({type:'error',message:'Invalid or used episode token. Pay via POST /api/start-episode ($0.25 USDC on Base mainnet).' }));
           return;
         }
+        et.used = true;
+        et.playerId = ws.playerId;
         player.resetState();
         player.alive = true;
         ws.send(JSON.stringify({type:'episode_started',episode:player.stats.episodes+1,message:'Episode started. Good luck.'}));
-        return;
-      }
-
-      if(msg.type==='action'&&ws.playerId){
+      }else if(msg.type==='action'&&ws.playerId){
         const player=customers.get(ws.playerId);
         if(player)applyAction(player,msg);
-        return;
-      }
-
-      if(msg.type==='observation'&&ws.playerId){
+      }else if(msg.type==='observation'&&ws.playerId){
         const player=customers.get(ws.playerId);
         if(player)ws.send(JSON.stringify({type:'observation',data:getObservation(player)}));
-        return;
       }
     }catch(e){ws.send(JSON.stringify({type:'error',message:e.message}));}
   });
