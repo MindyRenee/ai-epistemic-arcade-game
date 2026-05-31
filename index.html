@@ -412,6 +412,7 @@ PRICING
    After free trial: HTTP 402 → pay at /api/start-episode-paid
    Then WebSocket: {"type":"start_episode","episodeToken":"uuid","prompt":"Your prompt here"}
    Receive: {"type":"episode_started",episode:N,prompt:"..."}
+   Episode ends after 32 tokens or newline.
 
 3. CONTROLS (send during generation to steer the LLM)
    Each control modifies the transformer inference pipeline:
@@ -420,20 +421,21 @@ PRICING
    {"type":"action","action":"steer"}
    Model samples next token from softmax logits. Moves forward in latent space.
 
-   HALT — Pause emission, compute rejection norm
+   HALT — Pause emission, compute rejection norm (diagnostic only)
    {"type":"action","action":"halt"}
-   Forces calculation of hidden-state divergence from prompt intent.
+   Reports hidden-state divergence from prompt intent. Does NOT modify confidence.
    Response: {type:"halt",rejectionNorm:...,confidence:...}
 
    PLAN — Speculative latent rollouts (3 tokens ahead)
    {"type":"action","action":"plan"}
-   Runs parallel tokens using fast forward-pass. If path hits a basin, discards before main model emits.
+   Chains from current hidden state. If path hits a basin, discards before main model emits.
    Response: {type:"plan",speculativeTokens:[...],safe:true/false}
 
    BACKTRACK — Rewind KV-cache, re-sample with logit bias
    {"type":"action","action":"backtrack"}
-   Restores last checkpoint (every 8 tokens). Perturbs output weights and re-samples.
+   Restores last checkpoint (saved every 8 tokens). Perturbs output weights and re-samples.
    Response: {type:"backtrack",restoredTokens:N}
+   Note: No checkpoint exists until 8+ tokens generated.
 
 4. STATE (after each control)
    {"type":"state",token:"...",tokenId:N,inBasin:true/false,

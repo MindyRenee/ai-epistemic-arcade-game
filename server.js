@@ -178,7 +178,7 @@ class GenerationSession {
     this.basinHits=0;
     this.controlsUsed={steer:0,halt:0,plan:0,backtrack:0};
     this.finished=false;
-    this.maxTokens=128;
+    this.maxTokens=32;
     // Encode prompt as token IDs (simple char codes)
     this.promptTokens=[...prompt].map(c=>Math.min(Math.max(c.charCodeAt(0),32),127));
     this.promptMean=this.computePromptMean();
@@ -200,7 +200,6 @@ class GenerationSession {
       // Compute rejection norm on current hidden state
       const lastH=this.hiddenStates[this.hiddenStates.length-1]||this.promptMean;
       const rj=rejectionNorm(lastH,this.promptMean);
-      this.confidence=Math.max(0,1-rj/Math.sqrt(D));
       return {type:'halt',rejectionNorm:rj,confidence:this.confidence,message:'Halted. Inspecting hidden-state geometry.'};
     }
 
@@ -212,8 +211,9 @@ class GenerationSession {
       const specTokens=[];
       const specHidden=[];
       let safe=true;
+      let specH=this.hiddenStates[this.hiddenStates.length-1]||this.promptMean;
       for(let i=0;i<3;i++){
-        let h=this.promptMean;
+        let h=specH;
         for(let l=0;l<L;l++)h=forwardLayer(h,layers[l]);
         const lg=logits(h);
         const probs=softmax(lg);
@@ -221,9 +221,10 @@ class GenerationSession {
         specTokens.push(nextId);
         specHidden.push(h);
         if(isInBasin(h)){safe=false;this.basinHits++;break;}
+        specH=h;
       }
       this.planTokens=specTokens;
-      return {type:'plan',speculativeTokens:specTokens.map(id=>String.fromCharCode(id)),safe,message:safe?'Plan path clear.':'Plan path hit basin — discarding.'};
+      return {type:'plan',speculativeTokens:specTokens.map(id=>String.fromCharCode(32+(id%95))),safe,message:safe?'Plan path clear.':'Plan path hit basin — discarding.'};
     }
 
     if(control==='backtrack'){
@@ -266,7 +267,7 @@ class GenerationSession {
     this.tokens.push(tokenId);
     this.hiddenStates.push(hidden);
     this.kv.push(tokenId,hidden,hidden); // simplified KV
-    const char=String.fromCharCode(tokenId);
+    const char=String.fromCharCode(32+(tokenId%95));
     this.output+=char;
 
     if(this.tokens.length>=this.maxTokens||char==='\n')this.finished=true;

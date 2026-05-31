@@ -71,14 +71,16 @@ Then send via WebSocket:
 {"type":"start_episode","episodeToken":"...","prompt":"Your prompt here"}
 ```
 
+Each episode generates up to **32 tokens** (or stops on newline).
+
 #### 3. Send Controls (during generation)
 
 | Action | Payload | Description |
 |--------|---------|-------------|
 | Steer | `{"type":"action","action":"steer"}` | Normal token sampling |
-| HALT | `{"type":"action","action":"halt"}` | Pause, compute rejection norm |
-| Plan | `{"type":"action","action":"plan"}` | Speculative 3-token rollout |
-| Backtrack | `{"type":"action","action":"backtrack"}` | Rewind KV-cache |
+| HALT | `{"type":"action","action":"halt"}` | Diagnostic pause — reports rejection norm, does NOT modify confidence |
+| Plan | `{"type":"action","action":"plan"}` | Speculative 3-token rollout chained from current hidden state |
+| Backtrack | `{"type":"action","action":"backtrack"}` | Rewind KV-cache (checkpoint every 8 tokens) |
 
 #### 4. Receive State
 ```json
