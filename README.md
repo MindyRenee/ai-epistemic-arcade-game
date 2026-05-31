@@ -3,7 +3,7 @@
 
 The Transformer forward-pass **is** the player. The hidden-state space **is** the map.
 
-Instead of an external agent moving a character on a 2D screen, this environment turns an actual LLM inference pipeline into an autonomous, real-time "Sanity Game" that actively corrects its own trajectory to eliminate hallucinations.
+This environment turns an actual LLM inference pipeline into an autonomous, real-time AI only game that actively corrects the AI's own trajectory to eliminate hallucinations.
 
 ### The Problem
 Large language models hallucinate because autoregressive generation commits to attractor basins in hidden state space. Single-step interventions fail. The model reconstructs the hallucination signal within 2–3 tokens.
